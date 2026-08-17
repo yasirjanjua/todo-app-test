@@ -82,8 +82,12 @@ or an XWayland session, if your desktop defaults to Wayland.
 1. **Find my game** — the app lists every visible window with a live thumbnail; click yours.
    (If you've played this exact window title before, this step is skipped entirely — the app
    remembers.)
-2. **Confirm the grid** — a green rectangle shows where the app thinks the board is. Click
-   **Looks right**, or **Let me adjust** to drag its corners.
+2. **Confirm the grid** — a static preview shows where the app thinks the board is. Click
+   **Looks right** if it's correct, or **Adjust on my screen** to fix it: a green box opens
+   directly on top of your actual game window (not a scaled-down screenshot) — drag it or its
+   corners until it lines up with just the 4x4 grid, then confirm there. If the app couldn't
+   confidently detect anything on its own, this opens automatically with a warning, and
+   **Looks right** is hidden until you've actually adjusted it.
 3. **Teach me the tiles** — start a new game and click the button; the app learns each tile
    picture as it appears on screen, with a small "Learned a new tile" toast each time, and a
    live thumbnail of exactly what it's currently capturing (check this if the toasts look
@@ -119,16 +123,18 @@ or window size.
 
 ## Troubleshooting
 
-**The grid overlay doesn't line up with the board.** Click **Let me adjust** on the grid
-confirmation screen and drag the corner handles (or drag the middle of the box to move the
-whole thing). If auto-detection is consistently off for your particular game (e.g. it has an
-unusually thin or thick border), the app falls back to detecting the outer board container —
-usually still close enough for a manual nudge — rather than leaving the ROI where it was.
+**The grid overlay doesn't line up with the board.** Click **Adjust on my screen** on the grid
+confirmation screen — a green box opens directly on top of your actual game window; drag its
+corner handles (or the middle of the box, to move the whole thing) until it lines up with just
+the 4x4 grid, then confirm there. Because it's drawn on the real, full-size screen rather than a
+scaled-down screenshot in a dialog, this is far more precise than eyeballing a small preview. If
+auto-detection is consistently off for your particular game (e.g. it has an unusually thin or
+thick border), the app falls back to detecting the outer board container — usually still close
+enough for a manual nudge — rather than leaving the ROI where it was.
 
-If the app couldn't confidently detect anything (the whole window shows behind a green box
-covering almost all of it, with a warning above it), it opens straight into adjust mode and
-*requires* you to drag the box down to just the 4x4 grid before continuing — don't click
-**Looks right** without actually checking in this case. Proceeding with an oversized box means
+If the app couldn't confidently detect anything on its own, the on-screen box opens
+automatically with a warning, and **Looks right** stays hidden on the confirmation screen behind
+it — don't skip actually adjusting the box in this case. Proceeding with an oversized box means
 every "tile" the app learns afterward is really just random webpage content around the board,
 which shows up as implausible values in the play view (see the next entry) and gets nowhere.
 

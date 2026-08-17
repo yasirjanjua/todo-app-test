@@ -10,8 +10,8 @@ from __future__ import annotations
 import logging
 import sys
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QMainWindow, QMessageBox, QPushButton, QStackedWidget, QVBoxLayout, QWidget
+from PySide6.QtCore import QPoint, QRect, Qt, Signal
+from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox, QPushButton, QStackedWidget, QVBoxLayout, QWidget
 
 from app.config import AppConfig
 from app.play_loop import PlayController, PlayEvent, PlayState
@@ -25,6 +25,7 @@ from backends.window_enum import OWN_WINDOW_TITLE, enumerate_windows
 from ui.advanced_panel import AdvancedPanel
 from ui.hotkeys import GlobalHotkeys
 from ui.play_panel import PlayPanel
+from ui.screen_overlay import ScreenRegionOverlay
 from ui.wizard_arrange_screen import ArrangeScreenPage
 from ui.wizard_grid_confirm import GridConfirmPage
 from ui.wizard_window_picker import WindowPickerPage
@@ -73,6 +74,7 @@ class MainWindow(QMainWindow):
 
         self.play_panel: PlayPanel | None = None
         self.play_controller: PlayController | None = None
+        self._screen_overlay: ScreenRegionOverlay | None = None
         self.hotkeys = GlobalHotkeys(self.config.hotkeys, self)
         self.hotkeys.pause_resume_pressed.connect(self._toggle_pause)
         self.hotkeys.stop_pressed.connect(self._stop_play)
@@ -222,7 +224,56 @@ class MainWindow(QMainWindow):
             detection_method=detection.method, parent=self,
         )
         page.grid_confirmed.connect(self._on_grid_confirmed)
+        page.adjust_on_screen_requested.connect(self._open_screen_overlay)
         self._swap_page(page)
+        if detection.method != "lattice":
+            # Mirrors GridConfirmPage's own "must not be confirmable without actually being
+            # checked" rule (see its module docstring) -- open the live overlay immediately
+            # rather than requiring an extra click a user might not realize they need.
+            self._open_screen_overlay()
+
+    def _open_screen_overlay(self) -> None:
+        # The detected box is in the captured frame's own coordinate space (physical pixels
+        # relative to the window's origin); the overlay works in screen-logical coordinates
+        # (absolute, matching QScreen.geometry()) since it's drawn directly on the real
+        # desktop, not on a copy of a screenshot -- convert one to the other in both
+        # directions (see _on_screen_overlay_confirmed for the reverse).
+        win_left, win_top, win_w, win_h = self.wizard.data.window_bounds
+        scale = self.wizard.data.scale_factor
+        detection = self.wizard.data.grid_detection
+        initial_rect = QRect(
+            round(win_left + detection.left / scale),
+            round(win_top + detection.top / scale),
+            round(detection.width / scale),
+            round(detection.height / scale),
+        )
+        window_center = QPoint(win_left + win_w // 2, win_top + win_h // 2)
+        screen = next(
+            (s for s in QApplication.screens() if s.geometry().contains(window_center)),
+            QApplication.primaryScreen(),
+        )
+
+        self._close_screen_overlay()
+        self._screen_overlay = ScreenRegionOverlay(screen.geometry(), initial_rect, self)
+        self._screen_overlay.region_confirmed.connect(self._on_screen_overlay_confirmed)
+        self._screen_overlay.cancelled.connect(self._close_screen_overlay)
+        self._screen_overlay.show()
+
+    def _on_screen_overlay_confirmed(self, rect: QRect) -> None:
+        win_left, win_top, _w, _h = self.wizard.data.window_bounds
+        scale = self.wizard.data.scale_factor
+        left = round((rect.left() - win_left) * scale)
+        top = round((rect.top() - win_top) * scale)
+        width = round(rect.width() * scale)
+        height = round(rect.height() * scale)
+        self._close_screen_overlay()
+        self._on_grid_confirmed(left, top, width, height)
+
+    def _close_screen_overlay(self) -> None:
+        if self._screen_overlay is not None:
+            self._screen_overlay.hide()
+            self._screen_overlay.deleteLater()
+            self._screen_overlay = None
 
     def _on_grid_confirmed(self, left: int, top: int, width: int, height: int) -> None:
         self.wizard.confirm_grid(left, top, width, height)
@@ -450,5 +501,6 @@ class MainWindow(QMainWindow):
         self._stack.setCurrentWidget(widget)
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt override signature
+        self._close_screen_overlay()
         self._stop_play()
         super().closeEvent(event)

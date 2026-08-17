@@ -196,26 +196,104 @@ def test_recalibrate_actually_redoes_the_wizard_instead_of_bouncing_back(qapp, t
         window.close()
 
 
-def test_low_confidence_grid_detection_opens_in_adjust_mode_with_a_warning(qapp) -> None:
+def test_low_confidence_grid_detection_hides_looks_right_and_requests_the_overlay(qapp) -> None:
     """Regression test for a real report: a "container" (non-lattice) grid detection
     confidently proposed almost the entire captured window as the board, and nothing in the
     confirmation screen stopped the user from proceeding with it -- every tile learned
     afterward was noise from the page around the actual board, not the board itself. A
-    non-lattice detection must now open directly in drag-to-adjust mode with a visible
-    warning, instead of silently presenting a possibly-wrong box behind a "Looks right"
-    button the user might click without checking.
+    non-lattice detection must hide "Looks right" (so it can't be confirmed unchecked) and
+    request the live on-screen overlay -- see MainWindow._show_grid_confirm_step, which opens
+    it automatically for exactly this case rather than requiring an extra click.
     """
     from ui.wizard_grid_confirm import GridConfirmPage
 
     frame = np.full((800, 1200, 3), (240, 235, 225), dtype=np.uint8)
 
     low_confidence_page = GridConfirmPage(frame, 0, 0, 1200, 800, detection_method="failed")
-    assert low_confidence_page._overlay._draggable is True
     assert low_confidence_page._needs_manual_check is True
+    assert low_confidence_page._looks_right_button.isVisibleTo(low_confidence_page) is False
 
     high_confidence_page = GridConfirmPage(frame, 100, 100, 400, 400, detection_method="lattice")
-    assert high_confidence_page._overlay._draggable is False
     assert high_confidence_page._needs_manual_check is False
+    assert high_confidence_page._looks_right_button.isVisibleTo(high_confidence_page) is True
+
+    # Confirming without adjustment still works for the trustworthy (lattice) case, using the
+    # auto-detected box translated back into full-frame coordinates.
+    confirmed = []
+    high_confidence_page.grid_confirmed.connect(lambda *args: confirmed.append(args))
+    high_confidence_page._looks_right_button.click()
+    assert confirmed == [(100, 100, 400, 400)]
+
+    # "Adjust on my screen" is available either way, as an escape hatch for a lattice detection
+    # that's slightly off too.
+    requests = []
+    high_confidence_page.adjust_on_screen_requested.connect(lambda: requests.append(True))
+    high_confidence_page._adjust_button.click()
+    assert requests == [True]
+
+
+def test_screen_region_overlay_confirms_in_absolute_screen_coordinates(qapp) -> None:
+    """Regression test for direct user feedback: dragging a box on a small, scaled-down static
+    screenshot was fiddly and imprecise. The overlay is drawn directly on the real screen
+    instead, working throughout in absolute screen-logical (QScreen.geometry()) coordinates --
+    verify a confirmed rectangle round-trips back to the same absolute coordinates it was
+    seeded with.
+    """
+    from PySide6.QtCore import QRect
+    from ui.screen_overlay import ScreenRegionOverlay
+
+    screen_geometry = QRect(100, 50, 1200, 800)  # a non-(0,0)-origin monitor, e.g. a secondary display
+    initial_rect = QRect(300, 200, 400, 300)  # absolute screen coordinates, already inside the screen
+
+    overlay = ScreenRegionOverlay(screen_geometry, initial_rect)
+    try:
+        confirmed = []
+        overlay.region_confirmed.connect(lambda r: confirmed.append(r))
+        overlay._confirm()
+        assert confirmed == [initial_rect]
+
+        cancelled = []
+        overlay.cancelled.connect(lambda: cancelled.append(True))
+        overlay._cancel()
+        assert cancelled == [True]
+    finally:
+        overlay.close()
+
+
+def test_open_screen_overlay_round_trips_through_window_and_scale_conversion(qapp, tmp_path, monkeypatch) -> None:
+    """Regression test for a real report: after grid auto-detection failed repeatedly, the
+    static-screenshot preview showed only a tiny sliver of real content -- symptomatic of a
+    capture-region bug, and exactly the kind of geometry math this test pins down. The detected
+    box (physical pixels relative to the window's own origin, what vision.grid_detect works in)
+    must convert to the overlay's absolute screen-logical coordinates and back to *exactly* the
+    original numbers when the box isn't moved, through the window's logical bounds and DPI
+    scale factor both ways.
+    """
+    from ui.main_window import MainWindow
+    from vision.grid_detect import GridDetectionResult
+
+    store = ProfileStore(tmp_path)
+    store.mark_screen_setup_complete()
+    window = MainWindow(profile_store=store, capture_backend=_FakeCaptureBackend())
+    try:
+        window.wizard.data.window_bounds = (50, 60, 400, 400)  # logical
+        window.wizard.data.scale_factor = 2.0
+        window.wizard.data.grid_detection = GridDetectionResult(
+            left=40, top=80, width=320, height=320, cells=(), confidence=0.0, method="failed",
+        )
+
+        confirmed = []
+        monkeypatch.setattr(window, "_on_grid_confirmed", lambda l, t, w, h: confirmed.append((l, t, w, h)))
+
+        window._open_screen_overlay()
+        assert window._screen_overlay is not None
+
+        window._screen_overlay._confirm()  # confirm without moving the box
+
+        assert confirmed == [(40, 80, 320, 320)]
+        assert window._screen_overlay is None, "must close itself once confirmed"
+    finally:
+        window.close()
 
 
 def test_tile_learning_page_shows_preview_and_blocks_on_mid_game_anomaly(qapp) -> None:
