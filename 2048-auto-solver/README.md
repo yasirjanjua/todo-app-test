@@ -124,11 +124,18 @@ key.
 
 ## Building from source
 
-Requires Python 3.11+.
+Use **Python 3.11 or 3.12** specifically, not whatever the newest release on your system is.
+Every pin in `requirements.txt` was verified against that range; several of them (PySide6,
+opencv, and especially the macOS `pyobjc-framework-*` packages) don't yet publish prebuilt
+wheels for brand-new Python releases (3.13/3.14 at time of writing), which makes `pip` fall
+back to building from source -- and older sdists like `pyobjc-framework-Quartz`'s frequently
+fail that build with a `pkg_resources`/`setuptools` incompatibility that has nothing to do
+with this project. If you hit that error, it means your venv's Python is too new; recreate it
+with 3.11/3.12 rather than trying to patch around the build failure.
 
 ```bash
 cd 2048-auto-solver
-python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+python3.11 -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 python main.py
 ```
