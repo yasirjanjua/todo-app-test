@@ -21,7 +21,7 @@ from backends.capture.base import CaptureRegion
 from backends.capture.factory import create_capture_backend
 from backends.input.factory import create_input_backend
 from ui.main_thread_input import MainThreadInputBackend
-from backends.window_enum import OWN_WINDOW_TITLE
+from backends.window_enum import OWN_WINDOW_TITLE, enumerate_windows
 from ui.advanced_panel import AdvancedPanel
 from ui.hotkeys import GlobalHotkeys
 from ui.play_hud import PlayHud
@@ -213,6 +213,29 @@ class MainWindow(QMainWindow):
             height=roi.height,
         )
 
+    def _probe_window_bounds(self) -> tuple[int, int, int, int] | None:
+        """Re-locate the calibrated window by title and report its *current* bounds.
+
+        Passed to :class:`PlayController` as ``window_bounds_probe`` so it can detect the
+        window having moved, been resized, or closed mid-play (Part 5.1) -- matched by title
+        rather than a raw window handle/ID, consistent with how the rest of the app already
+        identifies "the calibrated window" (see backends/window_enum.py and
+        app/profile.py), since IDs aren't guaranteed stable or even available across every
+        platform's enumeration backend.
+        """
+        title = self.wizard.data.window_title
+        if title is None:
+            return None
+        scale = self.wizard.data.scale_factor
+        try:
+            for _window_id, win_title, left, top, width, height, _pid in enumerate_windows():
+                if win_title == title:
+                    return int(left * scale), int(top * scale), int(width * scale), int(height * scale)
+        except Exception:  # noqa: BLE001 - a failed probe should pause play, not crash it
+            logger.warning("Failed to probe the calibrated window's current position.", exc_info=True)
+            return None
+        return None
+
     def _start_playing(self) -> None:
         # Constructed here, on the main/GUI thread, so its Qt thread affinity is the main
         # thread -- required for the cross-thread marshaling in MainThreadInputBackend to land
@@ -231,6 +254,7 @@ class MainWindow(QMainWindow):
             roi=self._current_roi(),
             app_config=self.config,
             on_event=self._on_play_event,
+            window_bounds_probe=self._probe_window_bounds,
         )
         if sys.platform != "darwin" or self.config.enable_macos_global_hotkeys:
             self.hotkeys.start()
@@ -275,6 +299,19 @@ class MainWindow(QMainWindow):
         # here; re-saving is cheap and idempotent, so it's simplest to always do it rather
         # than track a dirty flag -- this is what keeps a session's live-learned tiles from
         # being silently lost if the app is closed without recalibrating.
+        #
+        # Exception: if this session tripped the recognition-anomaly guard (too many "new"
+        # tiles in one read -- almost certainly a drifted ROI, not real gameplay), the
+        # in-memory recognizer may already contain a handful of bogus templates learned before
+        # the anomaly was detected. Writing those over the last-known-good profile would turn a
+        # recoverable-by-recalibrating session into a permanently corrupted one every future
+        # launch loads. Leave the saved profile untouched in that case.
+        if self.play_controller is not None and self.play_controller.had_recognition_anomaly:
+            logger.warning(
+                "Not saving the profile: this session's recognition looked unreliable "
+                "(see the recognition-anomaly pause). Recalibrate to fix it properly."
+            )
+            return
         try:
             self.wizard.save_profile()
         except RuntimeError:

@@ -27,6 +27,7 @@ from enum import Enum, auto
 
 import numpy as np
 
+from core.board import MAX_TIER
 from vision.recognition import TileRecognizer, is_empty_cell, make_template
 
 logger = logging.getLogger(__name__)
@@ -44,7 +45,7 @@ class LearningPhase(Enum):
 class LearningEvent:
     """Something the UI should react to (show a toast, ask for confirmation, etc.)."""
 
-    kind: str  # "learned_tile" | "await_confirmation" | "no_change"
+    kind: str  # "learned_tile" | "await_confirmation" | "anomaly" | "no_change"
     tier: int | None = None
     crop: np.ndarray | None = None
 
@@ -56,6 +57,13 @@ class TileLearner:
     recognizer: TileRecognizer = field(default_factory=TileRecognizer)
     phase: LearningPhase = LearningPhase.AWAITING_FRESH_BOARD
     next_tier: int = 1
+    # A single board read revealing more new tiers than this is not physically plausible from
+    # normal play (a move can advance the board's max tier by at most one merge chain -- see
+    # the module docstring), so exceeding it in one observe() call means recognition itself
+    # has gone unreliable (most likely the calibrated region has drifted onto changing content
+    # instead of the actual board) rather than that the game genuinely produced that many
+    # brand-new tiles at once. See _observe_auto_promote's "anomaly" LearningEvent.
+    max_new_tiles_per_observation: int = 2
     _pending_tier2_crop: np.ndarray | None = field(default=None, repr=False)
     _mid_game_observations: Counter[bytes] = field(default_factory=Counter, repr=False)
     _mid_game_crop_by_hash: dict[bytes, np.ndarray] = field(default_factory=dict, repr=False)
@@ -122,6 +130,8 @@ class TileLearner:
 
     def _observe_auto_promote(self, non_empty_crops: list[np.ndarray]) -> list[LearningEvent]:
         events: list[LearningEvent] = []
+        learned_this_call = 0
+        anomaly_flagged = False
         for crop in non_empty_crops:
             result = self.recognizer.classify(crop)
             if result.tier is not None:
@@ -135,6 +145,34 @@ class TileLearner:
                 events.append(LearningEvent(kind="await_confirmation", tier=2, crop=crop))
                 return events
 
+            if self.next_tier > MAX_TIER:
+                # The bitboard's 4-bit cells physically cannot hold a tier above MAX_TIER (15,
+                # i.e. on-screen value 32768) -- core.board.set_cell raises ValueError past
+                # that. Reaching this in real play would already be an extraordinary game;
+                # reaching it after only a handful of moves (as opposed to a long session)
+                # means recognition is almost certainly drifting -- e.g. the ROI has landed on
+                # dynamic content (an ad, a changing thumbnail) rather than the actual board,
+                # and every poll looks like a brand-new "sprite". Stop minting templates and
+                # leave this crop unrecognized so the caller's normal pause-and-diagnose path
+                # takes over instead of silently corrupting the board state further.
+                logger.warning(
+                    "Refusing to learn a tier above %d; recognition looks unstable (wrong ROI?).",
+                    MAX_TIER,
+                )
+                continue
+
+            if learned_this_call >= self.max_new_tiles_per_observation:
+                if not anomaly_flagged:
+                    logger.error(
+                        "More than %d new tiles in a single observation; this isn't physically "
+                        "plausible from normal play and almost certainly means the calibrated "
+                        "region is no longer looking at the actual board.",
+                        self.max_new_tiles_per_observation,
+                    )
+                    events.append(LearningEvent(kind="anomaly", tier=None, crop=crop))
+                    anomaly_flagged = True
+                continue
+
             # Tier 3+ can only arise from a merge, so ascending order is guaranteed; promote
             # silently.
             template = make_template(self.next_tier, crop)
@@ -142,6 +180,7 @@ class TileLearner:
             logger.info("Tile learning: auto-promoted a new sprite to tier %d.", self.next_tier)
             events.append(LearningEvent(kind="learned_tile", tier=self.next_tier, crop=crop))
             self.next_tier += 1
+            learned_this_call += 1
         return events
 
     def confirm_tier2(self, accept: bool) -> LearningEvent | None:

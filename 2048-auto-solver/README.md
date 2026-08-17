@@ -111,11 +111,24 @@ your particular game (e.g. it has an unusually thin or thick border), the app fa
 detecting the outer board container — usually still close enough for a manual nudge — rather
 than leaving the ROI where it was.
 
-**The app pauses with "Saw a tile I don't recognize."** This means a cell's picture didn't
-match any tile learned so far with high enough confidence — the app deliberately never guesses
-here, since one wrong tile corrupts every move after it. Press `S` to save the offending crop
-for inspection, then use **Recalibrate** and re-run tile learning; this usually happens when a
-theme change altered tile artwork after calibration.
+**The app pauses with "Saw a tile I can't place even after trying to learn it."** A new tile
+tier the recognizer has never seen is normally learned automatically and silently mid-play —
+since tiers above 2 can only ever appear via a merge, a never-seen sprite is unambiguous and
+gets added on the spot, no pause needed. This message means it genuinely couldn't be resolved
+that way (most commonly: calibration was finished before the tier-2 confirmation step ever
+came up). Press `S` to save the offending crop for inspection, then use **Recalibrate** and
+re-run tile learning.
+
+**The HUD shows huge, implausible tile values (e.g. 2048, 32768) on a game that just
+started, or pauses saying "This doesn't look like the game board anymore."** This means
+recognition itself has gone unreliable, almost always because the calibrated region is no
+longer actually looking at the board — most commonly a page reflow (an ad loading, a layout
+shift) moved the board within an otherwise-unmoved window, which the window-level "did it
+move" check can't catch since the window itself didn't move. Each poll then sees different
+content and mistakes it for a stream of brand-new tiles. The app caps how many new tiles a
+single reading can plausibly learn and pauses instead of guessing further the moment that cap
+is exceeded, and will *not* save those bogus tiles into your profile — but the fix is always
+the same: **Stop**, then **Recalibrate** to re-align the grid.
 
 **The app plays moves that don't do anything, or seems "stuck."** Every move is verified by
 re-reading the board and confirming it changed; an unchanged board is automatically treated as

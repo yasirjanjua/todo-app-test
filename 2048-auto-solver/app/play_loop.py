@@ -61,6 +61,7 @@ class PlayState(Enum):
     RUNNING = auto()
     PAUSED = auto()
     PAUSED_UNKNOWN_TILE = auto()
+    PAUSED_RECOGNITION_ANOMALY = auto()
     PAUSED_WINDOW_MOVED = auto()
     STOPPED = auto()
     GAME_OVER = auto()
@@ -138,6 +139,12 @@ class PlayController:
         self._pause_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        # Latches True the first time a single observation reveals more new tile tiers than is
+        # physically plausible (see TileLearner.max_new_tiles_per_observation) -- a strong
+        # signal recognition itself has gone unreliable, most likely a drifted ROI. Once set,
+        # this session stops attempting further live learning and the caller (ui/main_window.py)
+        # must not persist the polluted-looking templates back to the profile.
+        self.had_recognition_anomaly = False
 
     @property
     def state(self) -> PlayState:
@@ -155,6 +162,7 @@ class PlayController:
         self._pause_event.clear()
         self._stats = PlayStats()
         self._state = PlayState.RUNNING
+        self.had_recognition_anomaly = False
         self._thread = threading.Thread(target=self._run_loop, name="play-loop", daemon=True)
         self._thread.start()
 
@@ -166,7 +174,12 @@ class PlayController:
         self._emit("paused")
 
     def resume(self) -> None:
-        if self._state in (PlayState.PAUSED, PlayState.PAUSED_UNKNOWN_TILE, PlayState.PAUSED_WINDOW_MOVED):
+        if self._state in (
+            PlayState.PAUSED,
+            PlayState.PAUSED_UNKNOWN_TILE,
+            PlayState.PAUSED_RECOGNITION_ANOMALY,
+            PlayState.PAUSED_WINDOW_MOVED,
+        ):
             self._pause_event.clear()
             self._state = PlayState.RUNNING
             self._emit("resumed")
@@ -216,6 +229,12 @@ class PlayController:
                 learned_any = True
                 logger.info("Learned tile tier %d during play.", event.tier)
                 self._emit("learned_tile", message=f"Learned a new tile (tier {event.tier}).")
+            elif event.kind == "anomaly":
+                self.had_recognition_anomaly = True
+                logger.error(
+                    "Recognition anomaly: too many new tiles in one read. "
+                    "Disabling further live tile learning for this session."
+                )
         return learned_any
 
     def _read_board(self) -> tuple[int, list[RecognitionResult], np.ndarray]:
@@ -265,7 +284,7 @@ class PlayController:
                 unknown_cells = tuple(
                     (i // 4, i % 4) for i, r in enumerate(results) if r.tier is None
                 )
-                if unknown_cells:
+                if unknown_cells and not self.had_recognition_anomaly:
                     if self._try_learn_unknown_tiles(frame):
                         board, results = self._classify_frame(frame)
                         unknown_cells = tuple(
@@ -273,18 +292,30 @@ class PlayController:
                         )
 
                 if unknown_cells:
-                    # The learner couldn't resolve this on its own -- genuinely ambiguous
-                    # (e.g. calibration was stopped before the tier-2 confirmation step) or a
-                    # true misread. This is the one case that still needs a human.
-                    self._state = PlayState.PAUSED_UNKNOWN_TILE
+                    if self.had_recognition_anomaly:
+                        # A single read revealed an implausible number of "new" tiles -- almost
+                        # certainly a drifted ROI (e.g. capturing an ad or other dynamic content
+                        # instead of the board) rather than a real game state. Recalibrating is
+                        # the only real fix, so say so plainly instead of the generic message.
+                        self._state = PlayState.PAUSED_RECOGNITION_ANOMALY
+                        message = (
+                            "This doesn't look like the game board anymore (too many new tiles "
+                            "at once). Stop and Recalibrate."
+                        )
+                    else:
+                        # The learner couldn't resolve this on its own -- genuinely ambiguous
+                        # (e.g. calibration was stopped before the tier-2 confirmation step) or
+                        # a true misread. This is the one case that still needs a human.
+                        self._state = PlayState.PAUSED_UNKNOWN_TILE
+                        message = (
+                            "Saw a tile I can't place even after trying to learn it. "
+                            "Recalibrate to teach it, then resume."
+                        )
                     self._pause_event.set()
                     self._emit(
                         "unknown_tile",
                         grid=to_grid(board),
-                        message=(
-                            "Saw a tile I can't place even after trying to learn it. "
-                            "Recalibrate to teach it, then resume."
-                        ),
+                        message=message,
                         low_confidence_cells=unknown_cells,
                     )
                     continue

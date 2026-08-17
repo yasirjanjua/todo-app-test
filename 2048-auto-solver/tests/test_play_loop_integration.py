@@ -231,3 +231,74 @@ def test_play_loop_learns_new_tier_live_instead_of_pausing_forever() -> None:
     assert controller.state == PlayState.STOPPED
     assert all(e.kind != "unknown_tile" for e in events), "should never have needed to pause for the user"
     assert 3 in tile_learner.recognizer.templates, "the newly-learned tier should now be a known template"
+
+
+class _NoisyCaptureBackend:
+    """Always returns a board full of distinct, never-repeating noise -- standing in for a
+    misaligned/drifted ROI that has landed on dynamic content (an ad, a rotating thumbnail)
+    instead of the actual game board. Every cell looks like a brand-new, never-before-seen
+    "sprite" on every single read."""
+
+    def __init__(self) -> None:
+        self._counter = 0
+
+    def grab(self, region: CaptureRegion) -> np.ndarray:
+        rng = np.random.default_rng(self._counter)
+        self._counter += 1
+        frame = rng.integers(40, 220, (_CELL_PX * 4, _CELL_PX * 4, 3), dtype=np.uint8)
+        # Give each cell a bit of internal texture so is_empty_cell() doesn't treat it as
+        # background -- matching a real ad/thumbnail image, not a flat color.
+        for r in range(4):
+            for c in range(4):
+                y0, x0 = r * _CELL_PX, c * _CELL_PX
+                frame[y0 + 10 : y0 + 20, x0 + 10 : x0 + 60] = rng.integers(0, 255, 3, dtype=np.uint8)
+        return frame
+
+    def close(self) -> None:
+        pass
+
+
+def test_play_loop_stops_learning_after_implausibly_many_new_tiles() -> None:
+    """Regression test for a real crash report: a resumed profile whose ROI had drifted onto
+    dynamic content (visually, an ad banner) caused the recognizer to see a flood of distinct
+    "new" sprites. Before this fix, the learner minted a template for every single one with no
+    upper bound, eventually minting a tier above core.board.MAX_TIER (15) -- which
+    core.board.set_cell() rejects with ValueError, crashing the play loop entirely (the user
+    saw "The play loop hit an unexpected error and stopped" plus a HUD showing tiers up to
+    32768 after only two real moves). The fix caps both the absolute tier ceiling and the
+    number of new tiles a single observation may learn, and treats exceeding the latter as an
+    unresolvable anomaly rather than something to keep guessing at.
+    """
+    capture = _NoisyCaptureBackend()
+    input_backend = FakeInputBackend(FakeGame(seed=3))  # never actually used (loop pauses first)
+    tile_learner = _build_tile_learner(known_tiers={1, 2})
+    roi = Roi(left=0, top=0, width=_CELL_PX * 4, height=_CELL_PX * 4)
+    config = AppConfig(settle_timeout_ms=200.0, settle_frames=1)
+
+    events = []
+    controller = PlayController(
+        capture_backend=capture,
+        input_backend=input_backend,
+        tile_learner=tile_learner,
+        roi=roi,
+        app_config=config,
+        on_event=events.append,
+    )
+
+    controller.start()
+    deadline = time.monotonic() + 8.0
+    while time.monotonic() < deadline and controller.state != PlayState.PAUSED_RECOGNITION_ANOMALY:
+        time.sleep(0.05)
+    controller.stop()
+
+    assert controller.state == PlayState.STOPPED  # stop() always wins, but it got there via...
+    assert controller.had_recognition_anomaly is True
+    # No exception should ever have escaped the loop -- the whole point of the cap.
+    assert all(e.kind != "error" for e in events)
+    # The tier ceiling and per-observation cap must both have held: never above MAX_TIER, and
+    # only a couple of tiles actually minted despite dozens of "new" sprites flooding in.
+    from core.board import MAX_TIER
+
+    learned_tiers = sorted(tile_learner.recognizer.templates.keys())
+    assert all(t <= MAX_TIER for t in learned_tiers)
+    assert len(learned_tiers) <= 2 + len({1, 2}), f"learned too many tiles before the anomaly guard tripped: {learned_tiers}"
