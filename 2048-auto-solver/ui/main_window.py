@@ -17,7 +17,7 @@ from app.config import AppConfig
 from app.play_loop import PlayController, PlayEvent, PlayState
 from app.profile import GameProfile, ProfileStore
 from app.state_machine import WizardStateMachine, WizardStep
-from backends.capture.base import CaptureRegion
+from backends.capture.base import CaptureBackend, CaptureRegion
 from backends.capture.factory import create_capture_backend
 from backends.input.factory import create_input_backend
 from ui.main_thread_input import MainThreadInputBackend
@@ -46,7 +46,12 @@ class MainWindow(QMainWindow):
     # the same lesson applied to keystroke injection).
     _play_event_received = Signal(object)
 
-    def __init__(self, config: AppConfig | None = None, profile_store: ProfileStore | None = None) -> None:
+    def __init__(
+        self,
+        config: AppConfig | None = None,
+        profile_store: ProfileStore | None = None,
+        capture_backend: CaptureBackend | None = None,
+    ) -> None:
         super().__init__()
         self.setWindowTitle(OWN_WINDOW_TITLE)
         self.resize(720, 640)
@@ -55,7 +60,9 @@ class MainWindow(QMainWindow):
         self.config = config or AppConfig()
         self.profile_store = profile_store or ProfileStore()
         self.wizard = WizardStateMachine(self.profile_store)
-        self.capture_backend = create_capture_backend(prefer_dxcam=self.config.prefer_dxcam)
+        # Injectable so tests can exercise the wizard/UI without a real display server (the
+        # default mss backend needs one to open a screen-capture connection at all).
+        self.capture_backend = capture_backend or create_capture_backend(prefer_dxcam=self.config.prefer_dxcam)
 
         self.hud: PlayHud | None = None
         self.play_controller: PlayController | None = None
@@ -67,24 +74,37 @@ class MainWindow(QMainWindow):
         self._stack = QStackedWidget(self)
         self.setCentralWidget(self._stack)
 
-        self._advanced_panel = AdvancedPanel(self.config, self)
-        self._advanced_panel.config_changed.connect(self._on_config_changed)
-
         self._enter_current_step()
 
     # -- Step routing --------------------------------------------------------------------
 
     def _enter_current_step(self) -> None:
-        if self.wizard.step is WizardStep.PERMISSIONS:
-            self._show_permissions_step()
-        elif self.wizard.step is WizardStep.PICK_WINDOW:
-            self._show_window_picker_step()
-        elif self.wizard.step is WizardStep.CONFIRM_GRID:
-            self._show_grid_confirm_step()
-        elif self.wizard.step is WizardStep.LEARN_TILES:
-            self._show_tile_learning_step()
-        elif self.wizard.step is WizardStep.READY_TO_PLAY:
-            self._show_ready_to_play_step()
+        # Every wizard navigation funnels through here, so this is the one place that must
+        # never let an unexpected exception escape silently: a real user hit exactly that (a
+        # widget-lifecycle bug elsewhere) and was left staring at a screen that looked frozen,
+        # with the only evidence in a terminal they weren't watching -- repeatedly clicking
+        # with no idea anything had gone wrong. Whatever the underlying bug turns out to be,
+        # the UI's job is to say so, not to go silent.
+        try:
+            if self.wizard.step is WizardStep.PERMISSIONS:
+                self._show_permissions_step()
+            elif self.wizard.step is WizardStep.PICK_WINDOW:
+                self._show_window_picker_step()
+            elif self.wizard.step is WizardStep.CONFIRM_GRID:
+                self._show_grid_confirm_step()
+            elif self.wizard.step is WizardStep.LEARN_TILES:
+                self._show_tile_learning_step()
+            elif self.wizard.step is WizardStep.READY_TO_PLAY:
+                self._show_ready_to_play_step()
+        except Exception:  # noqa: BLE001 - the wizard must never fail silently and invisibly
+            logger.error("Failed to show wizard step %s", self.wizard.step, exc_info=True)
+            QMessageBox.critical(
+                self,
+                "Something went wrong",
+                "This step ran into an unexpected problem and couldn't be shown.\n\n"
+                "Check the app's log file for details. Try again, or restart the app if it "
+                "keeps happening.",
+            )
 
     def _show_permissions_step(self) -> None:
         from ui.wizard_permissions import PermissionsWizardPage
@@ -187,7 +207,19 @@ class MainWindow(QMainWindow):
         recalibrate.clicked.connect(self._recalibrate)
         layout.addWidget(recalibrate)
 
-        layout.addWidget(self._advanced_panel)
+        # Built fresh on every visit to this screen, parented to the disposable `container`
+        # (like every other wizard page) rather than kept as a long-lived MainWindow
+        # attribute: a previous version reused a single AdvancedPanel instance across visits,
+        # but _swap_page()'s deleteLater() on the *previous* container also destroys whatever
+        # is still parented to it -- including a reused-and-reparented AdvancedPanel, which
+        # left its Python wrapper referencing an already-deleted C++ object on the next visit
+        # ("libshiboken: Internal C++ object (AdvancedPanel) already deleted", reproduced by a
+        # real user hitting Recalibrate and getting permanently stuck). Sourcing its initial
+        # values from self.config -- already kept current via config_changed on every edit --
+        # means nothing is lost by rebuilding it each time.
+        advanced_panel = AdvancedPanel(self.config, container)
+        advanced_panel.config_changed.connect(self._on_config_changed)
+        layout.addWidget(advanced_panel)
         self._swap_page(container)
 
     def _recalibrate(self) -> None:
@@ -237,6 +269,17 @@ class MainWindow(QMainWindow):
         return None
 
     def _start_playing(self) -> None:
+        try:
+            self._start_playing_unsafe()
+        except Exception:  # noqa: BLE001 - see _enter_current_step's docstring comment
+            logger.error("Failed to start playing.", exc_info=True)
+            QMessageBox.critical(
+                self,
+                "Couldn't start",
+                "Something went wrong trying to start. Check the app's log file for details.",
+            )
+
+    def _start_playing_unsafe(self) -> None:
         # Constructed here, on the main/GUI thread, so its Qt thread affinity is the main
         # thread -- required for the cross-thread marshaling in MainThreadInputBackend to land
         # calls where macOS needs them. See ui/main_thread_input.py.
