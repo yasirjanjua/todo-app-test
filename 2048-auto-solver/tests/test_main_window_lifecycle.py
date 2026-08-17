@@ -253,3 +253,50 @@ def test_tile_learning_page_shows_preview_and_blocks_on_mid_game_anomaly(qapp) -
 
     page._fix_grid_button.click()
     assert recalibrate_requests == [True]
+
+
+def test_tile_learning_page_shows_tile_thumbnails_and_lets_user_reject_a_wrong_ranking(qapp) -> None:
+    """Regression test for direct user feedback: the tile-learning confirmation only ever
+    showed a tier number in a text toast, and the mid-game ranking's one confirmation step
+    could only ever be accepted -- "the only option for the user is to accept the tiles - while
+    not understanding if they are correct or not." Every learned tile must now show the actual
+    picture that was learned, and a wrong ranking must be rejectable and redoable rather than
+    something the user is stuck with.
+    """
+    from backends.capture.base import CaptureRegion
+    from ui.wizard_tile_learning import TileLearningPage
+    from vision.capture import Roi
+    from vision.tile_learning import TileLearner
+
+    class _StubCaptureBackend:
+        def grab(self, region: CaptureRegion):
+            return np.full((320, 320, 3), (200, 190, 180), dtype=np.uint8)
+
+    learner = TileLearner()
+    page = TileLearningPage(_StubCaptureBackend(), Roi(0, 0, 320, 320), learner)
+
+    page._on_start_mid_game()
+    for i in range(3):
+        rng = np.random.default_rng(i)
+        crop = rng.integers(30, 220, (64, 64, 3), dtype=np.uint8)
+        learner._observe_mid_game([crop])
+    page._finish_mid_game_observation()
+
+    # Every learned tile shows the actual picture, not just a tier number in text.
+    assert page._toast_list.count() == 3
+    for i in range(3):
+        assert not page._toast_list.item(i).icon().isNull()
+
+    assert page._confirm_no_button.isVisibleTo(page) is True
+    assert set(learner.recognizer.templates) == {1, 2, 3}
+
+    page._confirm_no_button.click()
+
+    # Rejecting must undo exactly what this batch learned and let the user redo it, not leave
+    # a possibly-wrong ranking as the only option on the table.
+    assert learner.recognizer.templates == {}
+    assert page._confirm_no_button.isVisibleTo(page) is False
+    assert page._confirm_yes_button.isVisibleTo(page) is False
+    assert page._finish_button.isEnabled() is False
+    assert page._toast_list.count() == 0
+    assert learner.phase.name == "MID_GAME_FALLBACK", "must have restarted observation, not just cleared state"

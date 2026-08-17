@@ -10,6 +10,14 @@ A live thumbnail of exactly what's being captured is shown throughout (see
 confusing scroll of "Learned a new tile" toasts with no way to tell why, when the actual
 problem -- the ROI capturing the wrong part of the screen entirely -- would have been obvious
 at a glance from the picture itself.
+
+Every "Learned a new tile" entry now also shows a thumbnail of the actual crop that was
+learned, not just a tier number -- direct user feedback was that a text-only toast gave no way
+to tell if what got learned was right, leaving "blindly accept" as the only option. The
+mid-game ranking confirmation (the one place a *whole batch* of tiles gets accepted at once
+from an automatic frequency guess, rather than one at a time) also gets a real "No, let me redo
+it" path that discards the batch and restarts observation, instead of only ever being able to
+accept it.
 """
 
 from __future__ import annotations
@@ -18,8 +26,16 @@ import logging
 
 import cv2
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QImage, QPixmap
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QListWidget, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtGui import QIcon, QImage, QPixmap
+from PySide6.QtWidgets import (
+    QHBoxLayout,
+    QLabel,
+    QListWidget,
+    QListWidgetItem,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from backends.capture.base import CaptureBackend
 from vision.capture import Roi, capture_board, flatten_cells, split_cells
@@ -29,6 +45,7 @@ logger = logging.getLogger(__name__)
 
 _POLL_INTERVAL_MS = 200
 _PREVIEW_MAX_DIM = 220
+_THUMBNAIL_DIM = 48
 
 
 def _bgr_to_pixmap(frame) -> QPixmap:
@@ -36,6 +53,16 @@ def _bgr_to_pixmap(frame) -> QPixmap:
     height, width = rgb.shape[:2]
     image = QImage(rgb.data, width, height, rgb.strides[0], QImage.Format.Format_RGB888)
     return QPixmap.fromImage(image.copy())
+
+
+def _crop_to_icon(crop) -> QIcon:
+    pixmap = _bgr_to_pixmap(crop).scaled(
+        _THUMBNAIL_DIM,
+        _THUMBNAIL_DIM,
+        Qt.AspectRatioMode.KeepAspectRatio,
+        Qt.TransformationMode.SmoothTransformation,
+    )
+    return QIcon(pixmap)
 
 
 class TileLearningPage(QWidget):
@@ -59,6 +86,9 @@ class TileLearningPage(QWidget):
         self._timer.setInterval(_POLL_INTERVAL_MS)
         self._timer.timeout.connect(self._poll_once)
         self._mid_game_mode = False
+        # Tiers learned so far in the current mid-game ranking batch, so a rejection can undo
+        # exactly those templates (and only those) rather than guessing what to discard.
+        self._pending_mid_game_tiers: list[int] = []
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -66,7 +96,8 @@ class TileLearningPage(QWidget):
 
         heading = QLabel(
             "<h2>Teach me the tiles</h2><p>Start a new game in the app, then click the button "
-            "below. I'll learn the tile pictures as they appear -- no typing required.</p>",
+            "below. I'll learn the tile pictures as they appear -- no typing required. Each "
+            "learned tile below shows the actual picture I saw, so you can check it's right.</p>",
             self,
         )
         heading.setWordWrap(True)
@@ -125,6 +156,7 @@ class TileLearningPage(QWidget):
     def _on_start_new_game(self) -> None:
         self._learner.start_new_game()
         self._mid_game_mode = False
+        self._pending_mid_game_tiers = []
         self._toast_list.clear()
         self._reset_anomaly_state()
         self._timer.start()
@@ -132,6 +164,7 @@ class TileLearningPage(QWidget):
     def _on_start_mid_game(self) -> None:
         self._learner.start_mid_game_fallback()
         self._mid_game_mode = True
+        self._pending_mid_game_tiers = []
         self._toast_list.clear()
         self._reset_anomaly_state()
         self._timer.start()
@@ -162,8 +195,13 @@ class TileLearningPage(QWidget):
 
     def _handle_event(self, event: LearningEvent) -> None:
         if event.kind == "learned_tile":
-            self._toast_list.addItem(f"Learned a new tile (tier {event.tier}).")
+            item = QListWidgetItem(f"Learned a new tile (tier {event.tier}).")
+            if event.crop is not None:
+                item.setIcon(_crop_to_icon(event.crop))
+            self._toast_list.addItem(item)
             self._finish_button.setEnabled(True)
+            if self._mid_game_mode and event.tier is not None:
+                self._pending_mid_game_tiers.append(event.tier)
         elif event.kind == "await_confirmation":
             self._timer.stop()
             self._confirm_label.setText("Is this a brand-new tile?")
@@ -195,18 +233,58 @@ class TileLearningPage(QWidget):
         for event in events:
             self._handle_event(event)
         if any(event.kind == "anomaly" for event in events):
+            self._pending_mid_game_tiers = []
             return
-        self._confirm_label.setText("Does that ranking look right (lowest tile first)?")
+        if not self._pending_mid_game_tiers:
+            return  # nothing observed to rank; nothing to confirm either
+        self._confirm_label.setText(
+            "Here's what I learned, lowest tile first (pictured above, in order). Does that "
+            "look right?"
+        )
         self._confirm_yes_button.setVisible(True)
         self._confirm_yes_button.setText("Yes, that's right")
-        self._confirm_no_button.setVisible(False)
         self._confirm_yes_button.clicked.disconnect()
         self._confirm_yes_button.clicked.connect(self._acknowledge_mid_game_ranking)
+        self._confirm_no_button.setVisible(True)
+        self._confirm_no_button.setText("No, let me redo it")
+        self._confirm_no_button.clicked.disconnect()
+        self._confirm_no_button.clicked.connect(self._reject_mid_game_ranking)
+
+    def _restore_tier2_confirmation_handlers(self) -> None:
+        """The confirm buttons are shared between the tier-2 single-tile confirmation and the
+        mid-game ranking's whole-batch confirmation; whichever one last reconfigured them must
+        put the tier-2 wiring back so a later real tier-2 confirmation still works."""
+        self._confirm_yes_button.setText("Yes, that's a new tile")
+        self._confirm_yes_button.clicked.disconnect()
+        self._confirm_yes_button.clicked.connect(lambda: self._resolve_tier2(True))
+        self._confirm_no_button.setText("No, that's a misread")
+        self._confirm_no_button.clicked.disconnect()
+        self._confirm_no_button.clicked.connect(lambda: self._resolve_tier2(False))
 
     def _acknowledge_mid_game_ranking(self) -> None:
         self._confirm_label.setText("")
         self._confirm_yes_button.setVisible(False)
+        self._confirm_no_button.setVisible(False)
+        self._restore_tier2_confirmation_handlers()
+        self._pending_mid_game_tiers = []
         self._finish_button.setEnabled(True)
+
+    def _reject_mid_game_ranking(self) -> None:
+        """The user says the ranking is wrong -- undo exactly the templates this batch minted
+        (not a full reset) and restart mid-game observation from scratch, instead of leaving
+        "accept it anyway" as the only option."""
+        for tier in self._pending_mid_game_tiers:
+            self._learner.recognizer.templates.pop(tier, None)
+        self._pending_mid_game_tiers = []
+        self._confirm_label.setText("")
+        self._confirm_yes_button.setVisible(False)
+        self._confirm_no_button.setVisible(False)
+        self._restore_tier2_confirmation_handlers()
+        self._toast_list.clear()
+        self._finish_button.setEnabled(False)
+        self._learner.start_mid_game_fallback()
+        self._timer.start()
+        QTimer.singleShot(4000, self._finish_mid_game_observation)
 
     def _on_finish(self) -> None:
         self._timer.stop()

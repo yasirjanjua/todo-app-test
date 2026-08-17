@@ -238,7 +238,16 @@ class PlayController:
         return learned_any
 
     def _read_board(self) -> tuple[int, list[RecognitionResult], np.ndarray]:
-        frame = self._capture_frame()
+        # Post-move reads are already stability-waited inside _attempt_move, but the very
+        # first read of a session (right as play starts, straight out of tile learning) has
+        # no such guarantee -- a still-finishing spawn/merge animation or a page still
+        # rendering can land several cells mid-transition, which the recognizer can't match
+        # to any template. _try_learn_unknown_tiles then sees several "new" sprites in one
+        # observation and trips the recognition-anomaly guard on a board that was fine a few
+        # frames later. Waiting for stability here (cheap when already settled -- it exits as
+        # soon as two consecutive frames match) closes that gap for every read, not just
+        # post-move ones.
+        frame = wait_for_stable(self._capture_frame, self._stability_config).frame
         board, results = self._classify_frame(frame)
         return board, results, frame
 

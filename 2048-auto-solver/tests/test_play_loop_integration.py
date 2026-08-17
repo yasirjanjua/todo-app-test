@@ -258,6 +258,75 @@ class _NoisyCaptureBackend:
         pass
 
 
+class _AnimatingThenSettledCaptureBackend:
+    """Returns a few frames of animation noise before settling on the game's real frame --
+    standing in for a move's on-screen slide/merge animation (or a page still rendering) still
+    finishing when a read happens to land mid-transition."""
+
+    def __init__(self, game: FakeGame, unstable_reads: int = 3) -> None:
+        self._game = game
+        self._unstable_reads = unstable_reads
+        self._count = 0
+
+    def list_monitors(self):
+        return []
+
+    def get_scale_factor(self, monitor_index: int = 0) -> float:
+        return 1.0
+
+    def grab(self, region: CaptureRegion) -> np.ndarray:
+        self._count += 1
+        if self._count <= self._unstable_reads:
+            rng = np.random.default_rng(self._count)
+            return rng.integers(0, 255, (_CELL_PX * 4, _CELL_PX * 4, 3), dtype=np.uint8)
+        return self._game.frame()
+
+    def close(self) -> None:
+        pass
+
+
+def test_play_loop_waits_for_stability_on_every_read_not_just_after_a_move() -> None:
+    """Regression test for a real report: tile learning finished cleanly (a plausible number of
+    tiers, well under the anomaly cap), but the very next play session still hit
+    PAUSED_RECOGNITION_ANOMALY immediately on Start. Root cause: post-move reads already waited
+    for the board to stop animating before classifying (see _attempt_move's wait_for_stable
+    call), but the very *first* read of a session -- straight out of tile learning -- had no
+    such wait at all. A read landing mid-animation (or mid-render) shows several cells that
+    don't match any template at once, which _try_learn_unknown_tiles misreads as several
+    brand-new tiles in a single observation, tripping the anomaly guard on a board that was
+    perfectly fine a few frames later. _read_board must wait for stability on every read.
+    """
+    game = FakeGame(seed=42)
+    capture = _AnimatingThenSettledCaptureBackend(game)
+    input_backend = FakeInputBackend(game)
+    tile_learner = _build_tile_learner()
+    roi = Roi(left=0, top=0, width=_CELL_PX * 4, height=_CELL_PX * 4)
+    config = AppConfig(settle_timeout_ms=2000.0, settle_frames=2)
+
+    events = []
+    controller = PlayController(
+        capture_backend=capture,
+        input_backend=input_backend,
+        tile_learner=tile_learner,
+        roi=roi,
+        app_config=config,
+        on_event=events.append,
+    )
+
+    controller.start()
+    deadline = time.monotonic() + 8.0
+    while time.monotonic() < deadline and controller.stats.moves_made < 1:
+        time.sleep(0.05)
+    controller.stop()
+
+    assert controller.had_recognition_anomaly is False, (
+        "transient animation noise on the first read must not trip the anomaly guard"
+    )
+    assert controller.state == PlayState.STOPPED
+    assert controller.stats.moves_made >= 1
+    assert all(e.kind not in ("error", "unknown_tile") for e in events)
+
+
 def test_play_loop_stops_learning_after_implausibly_many_new_tiles() -> None:
     """Regression test for a real crash report: a resumed profile whose ROI had drifted onto
     dynamic content (visually, an ad banner) caused the recognizer to see a flood of distinct
