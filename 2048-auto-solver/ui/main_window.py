@@ -207,6 +207,7 @@ class MainWindow(QMainWindow):
         roi = self._current_roi()
         page = TileLearningPage(self.capture_backend, roi, self.wizard.data.tile_learner, self)
         page.learning_finished.connect(self._on_tile_learning_finished)
+        page.recalibrate_requested.connect(self._recalibrate)
         self._swap_page(page)
 
     def _on_tile_learning_finished(self) -> None:

@@ -64,6 +64,13 @@ class TileLearner:
     # instead of the actual board) rather than that the game genuinely produced that many
     # brand-new tiles at once. See _observe_auto_promote's "anomaly" LearningEvent.
     max_new_tiles_per_observation: int = 2
+    # Mirrors max_new_tiles_per_observation's reasoning for the mid-game bootstrapping path:
+    # observing this many distinct sprites while ranking a board that's supposedly still
+    # early enough to need bootstrapping at all is implausible (every real report that hit
+    # this had a game score in the tens, i.e. a max tile around 8 -- tier 3 -- on screen) and
+    # is a much stronger sign the calibrated region isn't actually the board than that the
+    # game genuinely has that many distinct tiles. See finish_mid_game_ranking.
+    max_mid_game_tiers: int = 8
     _pending_tier2_crop: np.ndarray | None = field(default=None, repr=False)
     _mid_game_observations: Counter[bytes] = field(default_factory=Counter, repr=False)
     _mid_game_crop_by_hash: dict[bytes, np.ndarray] = field(default_factory=dict, repr=False)
@@ -221,9 +228,26 @@ class TileLearner:
 
         Returns one ``learned_tile`` event per ranked sprite plus a trailing
         ``await_confirmation`` event, since the spec calls for a single confirmation of the
-        overall ranking rather than a per-tile walkthrough.
+        overall ranking rather than a per-tile walkthrough. Returns a single ``anomaly`` event
+        instead, ranking nothing, if the observed sprite count is implausible (see
+        ``max_mid_game_tiers``) -- a real report showed this ranking 14 "tiles" from a board
+        that never showed anything above an 8 on screen, all silently accepted with no warning
+        at all.
         """
         ranked = self._mid_game_observations.most_common()
+
+        if len(ranked) > self.max_mid_game_tiers:
+            logger.error(
+                "Observed %d distinct sprites while bootstrapping from a mid-game board -- "
+                "more than a real board plausibly shows in this short a window. This almost "
+                "certainly means the calibrated region isn't actually the board. Refusing to "
+                "rank them.",
+                len(ranked),
+            )
+            self._mid_game_observations.clear()
+            self._mid_game_crop_by_hash.clear()
+            return [LearningEvent(kind="anomaly", tier=None, crop=None)]
+
         events: list[LearningEvent] = []
         for tier, (key, _count) in enumerate(ranked, start=1):
             crop = self._mid_game_crop_by_hash[key]

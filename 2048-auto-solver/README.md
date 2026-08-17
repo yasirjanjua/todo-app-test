@@ -76,9 +76,12 @@ or an XWayland session, if your desktop defaults to Wayland.
 2. **Confirm the grid** — a green rectangle shows where the app thinks the board is. Click
    **Looks right**, or **Let me adjust** to drag its corners.
 3. **Teach me the tiles** — start a new game and click the button; the app learns each tile
-   picture as it appears on screen, with a small "Learned a new tile" toast each time. No
-   typing or labeling involved. If you're already mid-game, use the "I'm already mid-game"
-   option instead.
+   picture as it appears on screen, with a small "Learned a new tile" toast each time, and a
+   live thumbnail of exactly what it's currently capturing (check this if the toasts look
+   wrong — it should visibly be your board, not something else). No typing or labeling
+   involved. If you're already mid-game, use the "I'm already mid-game" option instead. If it
+   ever reports seeing an implausible number of different tiles at once, it stops and offers a
+   **Fix the grid region** button rather than learning garbage — see Troubleshooting.
 4. **Start** — a small floating panel appears showing the board the app currently sees, its
    chosen move, search depth/decision time, and moves/sec, plus **Pause**, **Stop**, and
    **Save Snapshot** buttons. On Windows and Linux these also work as global hotkeys even
@@ -136,6 +139,27 @@ content and mistakes it for a stream of brand-new tiles. The app caps how many n
 single reading can plausibly learn and pauses instead of guessing further the moment that cap
 is exceeded, and will *not* save those bogus tiles into your profile — but the fix is always
 the same: **Stop**, then **Recalibrate** to re-align the grid.
+
+**Tile learning shows a long, fast-scrolling list of "Learned a new tile" toasts, or a
+warning that it's seeing too many different tiles at once.** Same root cause as above, just
+caught one step earlier, during calibration itself rather than during play — the grid box
+isn't actually positioned over the real board. Watch the live picture on the tile-learning
+screen: it should visibly show your board. If it shows something else (an ad, a different
+part of the page, the whole browser window), that confirms it. Click **Fix the grid region**
+(shown automatically once this is detected) to go back and re-adjust the box — drag it so it
+tightly wraps *just* the 4x4 grid, with none of the surrounding page inside it.
+
+**Recalibrating doesn't seem to fix anything, or the app keeps resuming an old, obviously
+wrong profile.** As a clean-slate reset that bypasses any doubt about the wizard picking up
+your changes: quit the app and delete its saved profiles, then relaunch and calibrate from
+scratch.
+- macOS: `rm -rf ~/Library/Application\ Support/2048AutoSolver/profiles`
+- Linux: `rm -rf ~/.local/share/2048AutoSolver/profiles`
+- Windows: delete the `profiles` folder under `%APPDATA%\2048AutoSolver`
+
+This applies whether you're running a packaged build or `python main.py` from source — profile
+data is saved to your OS's standard per-user application data folder either way, not
+alongside the app itself.
 
 **The app plays moves that don't do anything, or seems "stuck."** Every move is verified by
 re-reading the board and confirming it changed; an unchanged board is automatically treated as

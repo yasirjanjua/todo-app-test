@@ -4,13 +4,21 @@ Polls the calibrated ROI at a modest rate and feeds frames through ``vision.tile
 Tier 1 and tier 3+ appear as silent toasts; tier 2 pauses for one explicit confirmation (the
 90/10 spawn ambiguity described in the spec). A "started mid-game" escape hatch runs the
 frequency-ranking fallback instead.
+
+A live thumbnail of exactly what's being captured is shown throughout (see
+``_preview_label``): real-world feedback showed that a wrong or drifted grid region produces a
+confusing scroll of "Learned a new tile" toasts with no way to tell why, when the actual
+problem -- the ROI capturing the wrong part of the screen entirely -- would have been obvious
+at a glance from the picture itself.
 """
 
 from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import QTimer, Signal
+import cv2
+from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QListWidget, QPushButton, QVBoxLayout, QWidget
 
 from backends.capture.base import CaptureBackend
@@ -20,12 +28,21 @@ from vision.tile_learning import LearningEvent, TileLearner
 logger = logging.getLogger(__name__)
 
 _POLL_INTERVAL_MS = 200
+_PREVIEW_MAX_DIM = 220
+
+
+def _bgr_to_pixmap(frame) -> QPixmap:
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    height, width = rgb.shape[:2]
+    image = QImage(rgb.data, width, height, rgb.strides[0], QImage.Format.Format_RGB888)
+    return QPixmap.fromImage(image.copy())
 
 
 class TileLearningPage(QWidget):
     """Drives a :class:`TileLearner` from live (or injected, for tests) capture polling."""
 
     learning_finished = Signal()
+    recalibrate_requested = Signal()
 
     def __init__(
         self,
@@ -55,6 +72,16 @@ class TileLearningPage(QWidget):
         heading.setWordWrap(True)
         layout.addWidget(heading)
 
+        preview_row = QHBoxLayout()
+        preview_row.addWidget(QLabel("What I'm currently looking at:", self))
+        self._preview_label = QLabel(self)
+        self._preview_label.setFixedSize(_PREVIEW_MAX_DIM, _PREVIEW_MAX_DIM)
+        self._preview_label.setStyleSheet("border: 1px solid #555;")
+        self._preview_label.setScaledContents(False)
+        preview_row.addWidget(self._preview_label)
+        preview_row.addStretch(1)
+        layout.addLayout(preview_row)
+
         self._start_button = QPushButton("I started a new game", self)
         self._start_button.clicked.connect(self._on_start_new_game)
         layout.addWidget(self._start_button)
@@ -65,6 +92,17 @@ class TileLearningPage(QWidget):
 
         self._toast_list = QListWidget(self)
         layout.addWidget(self._toast_list)
+
+        self._anomaly_label = QLabel("", self)
+        self._anomaly_label.setWordWrap(True)
+        self._anomaly_label.setStyleSheet("color: #a15c00; font-weight: bold;")
+        self._anomaly_label.setVisible(False)
+        layout.addWidget(self._anomaly_label)
+
+        self._fix_grid_button = QPushButton("Fix the grid region", self)
+        self._fix_grid_button.setVisible(False)
+        self._fix_grid_button.clicked.connect(self.recalibrate_requested.emit)
+        layout.addWidget(self._fix_grid_button)
 
         confirm_row = QHBoxLayout()
         self._confirm_label = QLabel("", self)
@@ -88,15 +126,21 @@ class TileLearningPage(QWidget):
         self._learner.start_new_game()
         self._mid_game_mode = False
         self._toast_list.clear()
+        self._reset_anomaly_state()
         self._timer.start()
 
     def _on_start_mid_game(self) -> None:
         self._learner.start_mid_game_fallback()
         self._mid_game_mode = True
         self._toast_list.clear()
+        self._reset_anomaly_state()
         self._timer.start()
         # Give the fallback a few seconds of frames to observe before ranking.
         QTimer.singleShot(4000, self._finish_mid_game_observation)
+
+    def _reset_anomaly_state(self) -> None:
+        self._anomaly_label.setVisible(False)
+        self._fix_grid_button.setVisible(False)
 
     def _poll_once(self) -> None:
         try:
@@ -104,10 +148,17 @@ class TileLearningPage(QWidget):
         except Exception:  # noqa: BLE001 - a transient capture failure shouldn't kill the poller
             logger.warning("Tile-learning capture failed; will retry next tick.", exc_info=True)
             return
+        self._update_preview(frame)
         cells = flatten_cells(split_cells(frame))
         events = self._learner.observe(cells)
         for event in events:
             self._handle_event(event)
+
+    def _update_preview(self, frame) -> None:
+        pixmap = _bgr_to_pixmap(frame)
+        self._preview_label.setPixmap(
+            pixmap.scaled(self._preview_label.size(), Qt.AspectRatioMode.KeepAspectRatio)
+        )
 
     def _handle_event(self, event: LearningEvent) -> None:
         if event.kind == "learned_tile":
@@ -118,6 +169,16 @@ class TileLearningPage(QWidget):
             self._confirm_label.setText("Is this a brand-new tile?")
             self._confirm_yes_button.setVisible(True)
             self._confirm_no_button.setVisible(True)
+        elif event.kind == "anomaly":
+            self._timer.stop()
+            self._finish_button.setEnabled(False)
+            self._anomaly_label.setText(
+                "I'm seeing far more different tiles than a real board should have right now. "
+                "This almost always means the grid box isn't actually lined up with the board "
+                "-- click below to go back and fix it."
+            )
+            self._anomaly_label.setVisible(True)
+            self._fix_grid_button.setVisible(True)
 
     def _resolve_tier2(self, accept: bool) -> None:
         event = self._learner.confirm_tier2(accept)
@@ -133,6 +194,8 @@ class TileLearningPage(QWidget):
         events = self._learner.finish_mid_game_ranking()
         for event in events:
             self._handle_event(event)
+        if any(event.kind == "anomaly" for event in events):
+            return
         self._confirm_label.setText("Does that ranking look right (lowest tile first)?")
         self._confirm_yes_button.setVisible(True)
         self._confirm_yes_button.setText("Yes, that's right")

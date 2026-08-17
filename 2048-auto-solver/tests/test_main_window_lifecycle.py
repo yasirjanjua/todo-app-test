@@ -211,3 +211,45 @@ def test_low_confidence_grid_detection_opens_in_adjust_mode_with_a_warning(qapp)
     high_confidence_page = GridConfirmPage(frame, 100, 100, 400, 400, detection_method="lattice")
     assert high_confidence_page._overlay._draggable is False
     assert high_confidence_page._needs_manual_check is False
+
+
+def test_tile_learning_page_shows_preview_and_blocks_on_mid_game_anomaly(qapp) -> None:
+    """Regression test for a real report (with screenshot): the tile-learning screen showed 14
+    sequential "Learned a new tile" toasts with no indication anything was wrong, no live view
+    of what was actually being captured, and let the user proceed straight to Start with a
+    profile built from what turned out to be webpage noise, not real tiles.
+    """
+    from backends.capture.base import CaptureRegion
+    from ui.wizard_tile_learning import TileLearningPage
+    from vision.capture import Roi
+    from vision.tile_learning import TileLearner
+
+    class _NoiseCaptureBackend:
+        def grab(self, region: CaptureRegion):
+            return np.full((320, 320, 3), (200, 190, 180), dtype=np.uint8)
+
+    learner = TileLearner()
+    page = TileLearningPage(_NoiseCaptureBackend(), Roi(0, 0, 320, 320), learner)
+
+    # The live preview must actually update from a poll -- this is the concrete "show what
+    # you're looking at" fix, not just a cosmetic placeholder.
+    assert page._preview_label.pixmap().isNull()
+    page._on_start_new_game()
+    page._poll_once()
+    assert not page._preview_label.pixmap().isNull()
+
+    recalibrate_requests = []
+    page.recalibrate_requested.connect(lambda: recalibrate_requests.append(True))
+
+    for i in range(14):
+        rng = np.random.default_rng(i)
+        crop = rng.integers(30, 220, (64, 64, 3), dtype=np.uint8)
+        learner._observe_mid_game([crop])
+    page._finish_mid_game_observation()
+
+    assert page._anomaly_label.text() != ""
+    assert page._fix_grid_button.isVisibleTo(page)
+    assert page._finish_button.isEnabled() is False
+
+    page._fix_grid_button.click()
+    assert recalibrate_requests == [True]
