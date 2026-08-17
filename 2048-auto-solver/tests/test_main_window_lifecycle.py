@@ -296,6 +296,43 @@ def test_open_screen_overlay_round_trips_through_window_and_scale_conversion(qap
         window.close()
 
 
+def test_screen_overlay_covers_only_the_window_area_not_the_whole_screen(qapp, tmp_path) -> None:
+    """Regression test for a real report with a screenshot: with the overlay covering the
+    *entire* screen, this app's own window -- which had ended up sitting over part of the game
+    -- became completely unreachable, because the full-screen, always-on-top, click-capturing
+    overlay was swallowing every click on the whole screen, including ones meant for that
+    unrelated window. The overlay must only cover the target window's own area plus padding, not
+    the whole screen, so anything positioned outside that (including this app's own window, once
+    it isn't overlapping the game) stays clickable while adjusting.
+    """
+    from PySide6.QtWidgets import QApplication
+    from ui.main_window import MainWindow
+    from vision.grid_detect import GridDetectionResult
+
+    store = ProfileStore(tmp_path)
+    store.mark_screen_setup_complete()
+    window = MainWindow(profile_store=store, capture_backend=_FakeCaptureBackend())
+    try:
+        window.wizard.data.window_bounds = (50, 60, 400, 400)
+        window.wizard.data.scale_factor = 1.0
+        window.wizard.data.grid_detection = GridDetectionResult(
+            left=40, top=80, width=320, height=320, cells=(), confidence=0.0, method="failed",
+        )
+
+        window._open_screen_overlay()
+        overlay_geometry = window._screen_overlay.geometry()
+        screen_geometry = QApplication.primaryScreen().geometry()
+
+        assert overlay_geometry.width() < screen_geometry.width() or overlay_geometry.height() < screen_geometry.height(), (
+            "the overlay must not cover the entire screen"
+        )
+        # Still generous enough to drag the box well outside a badly-off detection.
+        assert overlay_geometry.width() >= 400 + 200
+        assert overlay_geometry.height() >= 400 + 200
+    finally:
+        window.close()
+
+
 def test_tile_learning_page_shows_preview_and_blocks_on_mid_game_anomaly(qapp) -> None:
     """Regression test for a real report (with screenshot): the tile-learning screen showed 14
     sequential "Learned a new tile" toasts with no indication anything was wrong, no live view

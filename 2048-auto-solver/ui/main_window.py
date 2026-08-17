@@ -252,12 +252,24 @@ class MainWindow(QMainWindow):
             (s for s in QApplication.screens() if s.geometry().contains(window_center)),
             QApplication.primaryScreen(),
         )
+        # Covers the target window's own area plus generous padding (enough room to drag the
+        # box well outside a badly-off detection), clamped to the actual screen -- not the
+        # *entire* screen. A real report showed why that matters: this app's own window ended
+        # up sitting over part of the game, and with a full-screen overlay there was no way to
+        # click past it to drag that window out of the way -- it was swallowing every click on
+        # the whole screen, including the ones meant for a completely unrelated window.
+        pad_x = max(200, win_w // 2)
+        pad_y = max(200, win_h // 2)
+        overlay_geometry = QRect(
+            win_left - pad_x, win_top - pad_y, win_w + 2 * pad_x, win_h + 2 * pad_y
+        ).intersected(screen.geometry())
 
         self._close_screen_overlay()
-        self._screen_overlay = ScreenRegionOverlay(screen.geometry(), initial_rect, self)
+        self._screen_overlay = ScreenRegionOverlay(overlay_geometry, initial_rect, self)
         self._screen_overlay.region_confirmed.connect(self._on_screen_overlay_confirmed)
         self._screen_overlay.cancelled.connect(self._close_screen_overlay)
         self._screen_overlay.show()
+        self._screen_overlay.setFocus()
 
     def _on_screen_overlay_confirmed(self, rect: QRect) -> None:
         win_left, win_top, _w, _h = self.wizard.data.window_bounds

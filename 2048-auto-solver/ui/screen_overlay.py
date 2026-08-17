@@ -19,7 +19,7 @@ same way the old floating HUD did (see ui/play_panel.py's docstring for that who
 from __future__ import annotations
 
 from PySide6.QtCore import QPoint, QPointF, QRect, Qt, Signal
-from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPaintEvent, QPen
+from PySide6.QtGui import QColor, QKeyEvent, QMouseEvent, QPainter, QPaintEvent, QPen
 from PySide6.QtWidgets import QHBoxLayout, QPushButton, QWidget
 
 _HANDLE_RADIUS = 9
@@ -159,6 +159,15 @@ class ScreenRegionOverlay(QWidget):
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         self._dragging_corner = None
         self._dragging_move = False
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
+        # A full-screen(-ish), always-on-top, click-capturing window is disorienting to be
+        # stuck behind if something looks wrong -- Escape is the universal "get me out of
+        # this" key, and shouldn't require precisely clicking a small Cancel button to reach.
+        if event.key() == Qt.Key.Key_Escape:
+            self._cancel()
+            return
+        super().keyPressEvent(event)
 
     def _clamp_to_widget(self, point: QPoint) -> QPoint:
         bounds = self.rect()
