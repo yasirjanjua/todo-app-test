@@ -125,6 +125,14 @@ class MainWindow(QMainWindow):
         self.wizard.data.use_pydirectinput = profile.use_pydirectinput
         recognizer = TileRecognizer(dict(profile.tile_templates), confidence_threshold=profile.confidence_threshold)
         self.wizard.data.tile_learner.recognizer = recognizer
+        # A resumed profile has no live TileLearner left over from its original calibration
+        # session -- only the templates it produced. Put the learner back into steady
+        # auto-promote mode from those templates so a brand-new tile tier encountered mid-play
+        # (inevitable once merges pass the highest tier seen during calibration) gets learned
+        # silently instead of pausing forever with no way to teach it. See
+        # app/play_loop.py's _try_learn_unknown_tiles and vision/tile_learning.py's
+        # resume_for_play for the mechanism.
+        self.wizard.data.tile_learner.resume_for_play()
         self.wizard.step = WizardStep.READY_TO_PLAY
         self._enter_current_step()
 
@@ -219,7 +227,7 @@ class MainWindow(QMainWindow):
         self.play_controller = PlayController(
             capture_backend=self.capture_backend,
             input_backend=input_backend,
-            recognizer=self.wizard.data.tile_learner.recognizer,
+            tile_learner=self.wizard.data.tile_learner,
             roi=self._current_roi(),
             app_config=self.config,
             on_event=self._on_play_event,
@@ -259,6 +267,18 @@ class MainWindow(QMainWindow):
         self.hotkeys.stop_listening()
         if self.hud is not None:
             self.hud.close()
+        self._save_profile_if_learned_new_tiles()
+
+    def _save_profile_if_learned_new_tiles(self) -> None:
+        # PlayController shares wizard.data.tile_learner by reference, so any tiles learned
+        # mid-play (see app/play_loop.py's _try_learn_unknown_tiles) are already reflected
+        # here; re-saving is cheap and idempotent, so it's simplest to always do it rather
+        # than track a dirty flag -- this is what keeps a session's live-learned tiles from
+        # being silently lost if the app is closed without recalibrating.
+        try:
+            self.wizard.save_profile()
+        except RuntimeError:
+            logger.debug("Nothing to save (play was stopped before a profile existed).", exc_info=True)
 
     def _save_debug_snapshot(self) -> None:
         if self.play_controller is None:

@@ -13,6 +13,11 @@ runtime:
   ``stop()`` always calls ``release_all()`` so no key is left held down (Part 5.5).
 * Dry-run mode runs the full perceive/decide pipeline and logs decisions without calling
   ``input_backend.tap_key`` at all (Part 3).
+* An unrecognized tile first tries to *learn itself*: tiers above 2 can only ever arise from
+  a merge (see ``vision/tile_learning.py``), so a never-seen sprite mid-play is unambiguously
+  the next tier and is silently promoted the same way calibration does, without stopping play.
+  Only a genuinely ambiguous case (or a learner that still can't resolve it) falls through to
+  an actual pause (Part 1.4, Part 2.2).
 """
 
 from __future__ import annotations
@@ -33,8 +38,9 @@ from core.board import Move, from_grid, is_game_over, to_grid
 from core.board import move as apply_move
 from core.solver import SolverConfig, get_best_move
 from vision.capture import Roi, capture_board, flatten_cells, split_cells
-from vision.recognition import RecognitionResult, TileRecognizer
+from vision.recognition import RecognitionResult
 from vision.stability import StabilityConfig, wait_for_stable
+from vision.tile_learning import TileLearner
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +103,7 @@ class PlayController:
         self,
         capture_backend: CaptureBackend,
         input_backend: InputBackend,
-        recognizer: TileRecognizer,
+        tile_learner: TileLearner,
         roi: Roi,
         app_config: AppConfig,
         on_event: Callable[[PlayEvent], None] | None = None,
@@ -105,7 +111,10 @@ class PlayController:
     ) -> None:
         self._capture = capture_backend
         self._input = input_backend
-        self._recognizer = recognizer
+        # Shared by reference with whoever constructed this controller (typically
+        # ui/main_window.py's wizard.data.tile_learner): tiles learned mid-play mutate this
+        # same object, so the caller can persist them back to the profile after stop().
+        self._learner = tile_learner
         self._roi = roi
         self._config = app_config
         self._on_event = on_event or (lambda event: None)
@@ -184,11 +193,30 @@ class PlayController:
 
     def _classify_frame(self, frame: np.ndarray) -> tuple[int, list[RecognitionResult]]:
         cells = flatten_cells(split_cells(frame, inset_ratio=self._config.cell_inset_ratio))
-        results = self._recognizer.classify_board(cells)
+        results = self._learner.recognizer.classify_board(cells)
         grid = [[0] * 4 for _ in range(4)]
         for i, result in enumerate(results):
             grid[i // 4][i % 4] = result.tier or 0
         return from_grid(grid), results
+
+    def _try_learn_unknown_tiles(self, frame: np.ndarray) -> bool:
+        """Attempt to silently learn any newly-appeared tile tier(s) from ``frame``.
+
+        Returns True if at least one tile was actually learned (meaning the caller should
+        re-classify the frame with the now-updated recognizer). Returns False when the
+        learner can't resolve it on its own -- e.g. the rare case where the profile's
+        calibration was interrupted before the tier-2 confirmation step -- leaving the normal
+        pause-and-wait-for-the-user path as the fallback.
+        """
+        cells = flatten_cells(split_cells(frame, inset_ratio=self._config.cell_inset_ratio))
+        events = self._learner.observe(cells)
+        learned_any = False
+        for event in events:
+            if event.kind == "learned_tile":
+                learned_any = True
+                logger.info("Learned tile tier %d during play.", event.tier)
+                self._emit("learned_tile", message=f"Learned a new tile (tier {event.tier}).")
+        return learned_any
 
     def _read_board(self) -> tuple[int, list[RecognitionResult], np.ndarray]:
         frame = self._capture_frame()
@@ -233,17 +261,30 @@ class PlayController:
                     self._emit("window_moved", message="The game window moved or resized. Pausing.")
                     continue
 
-                board, results, _frame = self._read_board()
+                board, results, frame = self._read_board()
                 unknown_cells = tuple(
                     (i // 4, i % 4) for i, r in enumerate(results) if r.tier is None
                 )
                 if unknown_cells:
+                    if self._try_learn_unknown_tiles(frame):
+                        board, results = self._classify_frame(frame)
+                        unknown_cells = tuple(
+                            (i // 4, i % 4) for i, r in enumerate(results) if r.tier is None
+                        )
+
+                if unknown_cells:
+                    # The learner couldn't resolve this on its own -- genuinely ambiguous
+                    # (e.g. calibration was stopped before the tier-2 confirmation step) or a
+                    # true misread. This is the one case that still needs a human.
                     self._state = PlayState.PAUSED_UNKNOWN_TILE
                     self._pause_event.set()
                     self._emit(
                         "unknown_tile",
                         grid=to_grid(board),
-                        message="Saw a tile I don't recognize. Pausing so it can be learned.",
+                        message=(
+                            "Saw a tile I can't place even after trying to learn it. "
+                            "Recalibrate to teach it, then resume."
+                        ),
                         low_confidence_cells=unknown_cells,
                     )
                     continue

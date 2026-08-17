@@ -75,6 +75,20 @@ class TileLearner:
         self._mid_game_crop_by_hash.clear()
         logger.info("Tile learning: falling back to frequency ranking for a mid-game start.")
 
+    def resume_for_play(self) -> None:
+        """(Re)enter the steady auto-promoting state from the recognizer's existing templates.
+
+        Used when resuming a previously-calibrated profile, where there is no live
+        ``TileLearner`` left over from the original calibration session -- only the templates
+        it produced. Tiers above 2 can only ever arise from a merge (see the module
+        docstring), so that invariant holds regardless of when or in which session the known
+        templates were learned, which is what makes it safe to auto-promote from here without
+        the tier-2 confirmation calibration itself required.
+        """
+        self.next_tier = max(self.recognizer.templates.keys(), default=0) + 1
+        self.phase = LearningPhase.AUTO_PROMOTING
+        logger.info("Tile learning: resuming in auto-promote mode from tier %d.", self.next_tier)
+
     def observe(self, cell_crops: list[np.ndarray]) -> list[LearningEvent]:
         """Feed one frame's worth of 16 cell crops through the learner; returns UI events."""
         if self.phase is LearningPhase.MID_GAME_FALLBACK:

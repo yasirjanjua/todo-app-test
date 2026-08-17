@@ -18,9 +18,10 @@ from app.config import AppConfig
 from app.play_loop import PlayController, PlayState
 from backends.capture.base import CaptureRegion
 from backends.input.base import Key
-from core.board import Move, empty_cells, set_cell
+from core.board import Move, empty_cells, from_grid, set_cell
 from vision.capture import Roi
 from vision.recognition import TileRecognizer, make_template
+from vision.tile_learning import TileLearner
 
 _KEY_TO_MOVE = {Key.UP: Move.UP, Key.DOWN: Move.DOWN, Key.LEFT: Move.LEFT, Key.RIGHT: Move.RIGHT}
 _TIER_COLORS = {
@@ -112,7 +113,7 @@ class FakeInputBackend:
         pass
 
 
-def _build_recognizer() -> TileRecognizer:
+def _build_tile_learner(known_tiers: set[int] | None = None) -> TileLearner:
     from core.board import set_cell
     from vision.capture import flatten_cells, split_cells
 
@@ -122,18 +123,25 @@ def _build_recognizer() -> TileRecognizer:
     # under-report confidence.
     recognizer = TileRecognizer(confidence_threshold=0.6)
     for tier in _TIER_COLORS:
+        if known_tiers is not None and tier not in known_tiers:
+            continue
         board = set_cell(0, 0, tier)
         frame = _render(board)
         cell_crop = flatten_cells(split_cells(frame, inset_ratio=0.15))[0]
         recognizer.add_template(make_template(tier, cell_crop))
-    return recognizer
+    learner = TileLearner(recognizer=recognizer)
+    # Mirrors what ui/main_window.py does when resuming a saved profile: pre-populated
+    # templates but no live calibration session, so jump straight into steady-state
+    # auto-promotion instead of waiting on a "start a new game" click that will never come.
+    learner.resume_for_play()
+    return learner
 
 
 def test_play_loop_plays_moves_and_stops_cleanly() -> None:
     game = FakeGame(seed=42)
     capture = FakeCaptureBackend(game)
     input_backend = FakeInputBackend(game)
-    recognizer = _build_recognizer()
+    tile_learner = _build_tile_learner()
     roi = Roi(left=0, top=0, width=_CELL_PX * 4, height=_CELL_PX * 4)
     config = AppConfig(settle_timeout_ms=200.0, settle_frames=1)
 
@@ -141,7 +149,7 @@ def test_play_loop_plays_moves_and_stops_cleanly() -> None:
     controller = PlayController(
         capture_backend=capture,
         input_backend=input_backend,
-        recognizer=recognizer,
+        tile_learner=tile_learner,
         roi=roi,
         app_config=config,
         on_event=events.append,
@@ -164,7 +172,7 @@ def test_play_loop_dry_run_never_calls_input() -> None:
     game = FakeGame(seed=7)
     capture = FakeCaptureBackend(game)
     input_backend = FakeInputBackend(game)
-    recognizer = _build_recognizer()
+    tile_learner = _build_tile_learner()
     roi = Roi(left=0, top=0, width=_CELL_PX * 4, height=_CELL_PX * 4)
     config = AppConfig(dry_run=True, settle_timeout_ms=200.0, settle_frames=1)
 
@@ -172,7 +180,7 @@ def test_play_loop_dry_run_never_calls_input() -> None:
     controller = PlayController(
         capture_backend=capture,
         input_backend=input_backend,
-        recognizer=recognizer,
+        tile_learner=tile_learner,
         roi=roi,
         app_config=config,
         on_event=events.append,
@@ -183,3 +191,43 @@ def test_play_loop_dry_run_never_calls_input() -> None:
 
     assert input_backend.taps == []
     assert any(e.kind == "decision" for e in events)
+
+
+def test_play_loop_learns_new_tier_live_instead_of_pausing_forever() -> None:
+    """Regression test: a resumed profile's recognizer only knows the tiers it saw during its
+    original calibration; a merge in the *current* session routinely produces a tier that
+    calibration never saw. Before the live-learning fix, this paused the controller
+    indefinitely in PAUSED_UNKNOWN_TILE with no way to recover -- exactly what a real user hit.
+    """
+    game = FakeGame(seed=1)
+    # Force a merge on the very next LEFT move: two tier-2 tiles adjacent in row 0, producing
+    # a tier-3 tile the learner (which only knows tiers 1 and 2) has never seen.
+    game.board = from_grid([[2, 2, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]])
+
+    capture = FakeCaptureBackend(game)
+    input_backend = FakeInputBackend(game)
+    tile_learner = _build_tile_learner(known_tiers={1, 2})
+    roi = Roi(left=0, top=0, width=_CELL_PX * 4, height=_CELL_PX * 4)
+    config = AppConfig(settle_timeout_ms=200.0, settle_frames=1)
+
+    events = []
+    controller = PlayController(
+        capture_backend=capture,
+        input_backend=input_backend,
+        tile_learner=tile_learner,
+        roi=roi,
+        app_config=config,
+        on_event=events.append,
+    )
+
+    controller.start()
+    deadline = time.monotonic() + 8.0
+    while time.monotonic() < deadline and controller.stats.moves_made < 1:
+        time.sleep(0.05)
+    controller.stop()
+
+    learned_events = [e for e in events if e.kind == "learned_tile"]
+    assert learned_events, "expected the new tier to be learned live, not just detected as unknown"
+    assert controller.state == PlayState.STOPPED
+    assert all(e.kind != "unknown_tile" for e in events), "should never have needed to pause for the user"
+    assert 3 in tile_learner.recognizer.templates, "the newly-learned tier should now be a known template"
