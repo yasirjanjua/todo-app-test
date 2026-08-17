@@ -190,7 +190,10 @@ class MainWindow(QMainWindow):
 
         detection = detect_grid(frame)
         self.wizard.set_grid_detection(detection)
-        page = GridConfirmPage(frame, detection.left, detection.top, detection.width, detection.height, self)
+        page = GridConfirmPage(
+            frame, detection.left, detection.top, detection.width, detection.height,
+            detection_method=detection.method, parent=self,
+        )
         page.grid_confirmed.connect(self._on_grid_confirmed)
         self._swap_page(page)
 

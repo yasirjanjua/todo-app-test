@@ -106,10 +106,17 @@ or window size.
 ## Troubleshooting
 
 **The grid overlay doesn't line up with the board.** Click **Let me adjust** on the grid
-confirmation screen and drag the corner handles. If auto-detection is consistently off for
-your particular game (e.g. it has an unusually thin or thick border), the app falls back to
-detecting the outer board container — usually still close enough for a manual nudge — rather
-than leaving the ROI where it was.
+confirmation screen and drag the corner handles (or drag the middle of the box to move the
+whole thing). If auto-detection is consistently off for your particular game (e.g. it has an
+unusually thin or thick border), the app falls back to detecting the outer board container —
+usually still close enough for a manual nudge — rather than leaving the ROI where it was.
+
+If the app couldn't confidently detect anything (the whole window shows behind a green box
+covering almost all of it, with a warning above it), it opens straight into adjust mode and
+*requires* you to drag the box down to just the 4x4 grid before continuing — don't click
+**Looks right** without actually checking in this case. Proceeding with an oversized box means
+every "tile" the app learns afterward is really just random webpage content around the board,
+which shows up as implausible values in the HUD (see the next entry) and gets nowhere.
 
 **The app pauses with "Saw a tile I can't place even after trying to learn it."** A new tile
 tier the recognizer has never seen is normally learned automatically and silently mid-play —

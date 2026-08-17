@@ -1,4 +1,5 @@
-"""Regression tests for ui/main_window.py's widget lifecycle and error handling.
+"""Regression tests for the Qt UI layer (ui/main_window.py, ui/wizard_grid_confirm.py):
+widget lifecycle, error handling, and wizard-page behavior.
 
 Runs Qt in offscreen mode (no real display server needed) by setting QT_QPA_PLATFORM before
 PySide6 is imported anywhere in the process -- this module must stay the only one in the suite
@@ -188,3 +189,25 @@ def test_recalibrate_actually_redoes_the_wizard_instead_of_bouncing_back(qapp, t
         )
     finally:
         window.close()
+
+
+def test_low_confidence_grid_detection_opens_in_adjust_mode_with_a_warning(qapp) -> None:
+    """Regression test for a real report: a "container" (non-lattice) grid detection
+    confidently proposed almost the entire captured window as the board, and nothing in the
+    confirmation screen stopped the user from proceeding with it -- every tile learned
+    afterward was noise from the page around the actual board, not the board itself. A
+    non-lattice detection must now open directly in drag-to-adjust mode with a visible
+    warning, instead of silently presenting a possibly-wrong box behind a "Looks right"
+    button the user might click without checking.
+    """
+    from ui.wizard_grid_confirm import GridConfirmPage
+
+    frame = np.full((800, 1200, 3), (240, 235, 225), dtype=np.uint8)
+
+    low_confidence_page = GridConfirmPage(frame, 0, 0, 1200, 800, detection_method="failed")
+    assert low_confidence_page._overlay._draggable is True
+    assert low_confidence_page._needs_manual_check is True
+
+    high_confidence_page = GridConfirmPage(frame, 100, 100, 400, 400, detection_method="lattice")
+    assert high_confidence_page._overlay._draggable is False
+    assert high_confidence_page._needs_manual_check is False

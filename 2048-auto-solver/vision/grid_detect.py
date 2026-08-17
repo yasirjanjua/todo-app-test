@@ -31,7 +31,15 @@ EXPECTED_CELL_COUNT = BOARD_SIZE * BOARD_SIZE
 _MIN_CELL_AREA_FRACTION = 0.002
 _MAX_CELL_AREA_FRACTION = 0.10
 _MIN_BOARD_AREA_FRACTION = 0.10
-_MAX_BOARD_AREA_FRACTION = 0.98
+# A captured window frame always has *something* around the board -- a title bar, a score
+# header, page chrome, at minimum the browser's own UI -- so a "container" anywhere close to
+# the full frame is a sign the container-fallback contour search locked onto the page's outer
+# wrapper (or the whole viewport) rather than the board itself, not a sign of a tightly-cropped
+# capture. Confirmed against a real report: a fallback detection of 0.98x the frame area turned
+# out to be almost the entire browser window, and every tile "learned" against it afterward was
+# noise. 0.6 still comfortably fits a board that dominates a tightly cropped capture while
+# rejecting anything that's obviously swallowed the whole page.
+_MAX_BOARD_AREA_FRACTION = 0.6
 _MAX_ASPECT_DEVIATION = 0.30  # |w/h - 1| must stay under this to count as "roughly square"
 
 

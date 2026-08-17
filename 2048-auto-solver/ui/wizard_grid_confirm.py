@@ -242,9 +242,21 @@ class GridConfirmPage(QWidget):
         detected_top: int,
         detected_width: int,
         detected_height: int,
+        detection_method: str = "lattice",
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        # "lattice" (individual tile cells matched into a grid) is the only method with real
+        # per-cell evidence behind it; "container" (a single largest square-ish contour) and
+        # "failed" (no usable detection at all, box defaults to the whole frame) are
+        # best-effort guesses that need a human's eyes far more often. A real report showed
+        # exactly this: a "container" result confidently proposed nearly the entire browser
+        # window as the board, and nothing in the UI stopped the user proceeding with it, so
+        # every "tile" learned afterward was noise from the page around the actual board.
+        # Rather than rely on the user noticing on their own, low-confidence detections open
+        # directly in drag-to-adjust mode with an explicit warning instead of behind an extra
+        # "Let me adjust" click.
+        self._needs_manual_check = detection_method != "lattice"
         frame_h, frame_w = frame.shape[:2]
 
         pad = max(int(max(detected_width, detected_height) * _CROP_PADDING_FACTOR), _CROP_MIN_PADDING_PX)
@@ -272,6 +284,18 @@ class GridConfirmPage(QWidget):
 
         heading = QLabel("<h2>Does this look right?</h2>", self)
         layout.addWidget(heading)
+
+        if self._needs_manual_check:
+            warning = QLabel(
+                "I couldn't confidently find the board on my own this time. Drag the green "
+                "box's corners (or its middle, to move the whole thing) until it lines up "
+                "with just the 4x4 grid, then click Looks right.",
+                self,
+            )
+            warning.setWordWrap(True)
+            warning.setStyleSheet("color: #a15c00; font-weight: bold;")
+            layout.addWidget(warning)
+
         layout.addWidget(self._overlay)
 
         buttons = QHBoxLayout()
@@ -289,6 +313,11 @@ class GridConfirmPage(QWidget):
         buttons.addWidget(self._done_adjusting_button)
 
         layout.addLayout(buttons)
+
+        if self._needs_manual_check:
+            # Skip straight to drag-to-adjust rather than requiring an extra click a user
+            # might not realize they need -- see this class's docstring comment for why.
+            self._on_adjust()
 
     def _on_adjust(self) -> None:
         self._overlay.set_draggable(True)
