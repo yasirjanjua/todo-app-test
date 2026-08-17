@@ -20,6 +20,7 @@ from app.state_machine import WizardStateMachine, WizardStep
 from backends.capture.base import CaptureRegion
 from backends.capture.factory import create_capture_backend
 from backends.input.factory import create_input_backend
+from ui.main_thread_input import MainThreadInputBackend
 from backends.window_enum import OWN_WINDOW_TITLE
 from ui.advanced_panel import AdvancedPanel
 from ui.hotkeys import GlobalHotkeys
@@ -195,7 +196,11 @@ class MainWindow(QMainWindow):
         )
 
     def _start_playing(self) -> None:
-        input_backend = create_input_backend(use_pydirectinput=self.wizard.data.use_pydirectinput)
+        # Constructed here, on the main/GUI thread, so its Qt thread affinity is the main
+        # thread -- required for the cross-thread marshaling in MainThreadInputBackend to land
+        # calls where macOS needs them. See ui/main_thread_input.py.
+        raw_input_backend = create_input_backend(use_pydirectinput=self.wizard.data.use_pydirectinput)
+        input_backend = MainThreadInputBackend(raw_input_backend, self)
         self.hud = PlayHud()
         self.hud.pause_button.clicked.connect(self._toggle_pause)
         self.hud.stop_button.clicked.connect(self._stop_play)
