@@ -156,6 +156,19 @@ class ProfileStore:
     def _path_for(self, window_title: str) -> Path:
         return self.profiles_dir / f"{slugify(window_title)}.json"
 
+    @property
+    def _screen_setup_marker(self) -> Path:
+        return self.profiles_dir / ".screen_arranged"
+
+    def has_completed_screen_setup(self) -> bool:
+        """Whether the user has already been through the first-run screen-arrangement step
+        (see ``ui/wizard_arrange_screen.py``) -- a marker file, not per-profile state, since it
+        applies once for the whole installation, not once per game."""
+        return self._screen_setup_marker.exists()
+
+    def mark_screen_setup_complete(self) -> None:
+        self._screen_setup_marker.touch()
+
     def save(self, profile: GameProfile) -> None:
         profile.updated_at = time.time()
         path = self._path_for(profile.window_title)

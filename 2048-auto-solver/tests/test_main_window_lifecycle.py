@@ -17,7 +17,6 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
 import pytest
-from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMessageBox
 
@@ -80,6 +79,10 @@ def test_revisiting_ready_to_play_repeatedly_does_not_crash(qapp, tmp_path, wind
     from vision.recognition import make_template
 
     store = ProfileStore(tmp_path)
+    # Not under test here (see test_arrange_screen_step_is_shown_once_then_skipped for that) --
+    # skip straight past the one-time screen-arrangement step so this test can isolate the
+    # widget-lifecycle bug it's actually about.
+    store.mark_screen_setup_complete()
     templates = {1: make_template(1, np.full((64, 64, 3), (200, 190, 180), dtype=np.uint8))}
     profile = GameProfile(
         window_title=window_info.title,
@@ -151,6 +154,7 @@ def test_recalibrate_actually_redoes_the_wizard_instead_of_bouncing_back(qapp, t
     from vision.recognition import make_template
 
     store = ProfileStore(tmp_path)
+    store.mark_screen_setup_complete()  # not under test here; see the ARRANGE_SCREEN-specific test
     # A profile with templates already present, standing in for the corrupted profile a real
     # user would be trying to get away from by recalibrating.
     templates = {t: make_template(t, np.full((64, 64, 3), (200 - t, 190, 180), dtype=np.uint8)) for t in range(1, 4)}
@@ -302,20 +306,106 @@ def test_tile_learning_page_shows_a_live_recognized_grid_not_just_toasts(qapp) -
     assert all(cell.text() == "" for cell in other_labels), "empty cells must show as empty, not unknown"
 
 
-def test_hud_never_accepts_keyboard_focus(qapp) -> None:
-    """Regression test for a real report: all four candidate moves failed to change the board,
-    repeatedly, for several seconds immediately after Start -- traced to PlayHud.show() handing
-    OS keyboard focus to our own app instead of leaving it on the game window, so the injected
-    keystrokes landed on nothing useful. The HUD is an always-on-top overlay; it must never be
-    focusable, independent of z-order or visibility.
+def test_starting_play_embeds_the_panel_instead_of_a_separate_floating_window(
+    qapp, tmp_path, window_info, monkeypatch
+) -> None:
+    """Regression test for a real report with a screenshot: the play status used to be a
+    separate always-on-top floating window (PlayHud) that landed directly on top of several
+    board tiles. Since screen capture reads the literal compositor output, that overlap wasn't
+    just visually distracting -- the recognizer was reading the floating window's own buttons
+    and stats as if they were tiles. The fix removes the separate window entirely: play status
+    now lives inside MainWindow's own central stack (ui/play_panel.py's PlayPanel), so it can
+    never be positioned on top of the game board by anything other than the user dragging this
+    whole app window there themselves.
     """
-    from ui.play_hud import PlayHud
+    import ui.main_window as main_window_module
+    from app.config import AppConfig
+    from app.profile import GameProfile, RoiOffset
+    from ui.main_window import MainWindow
+    from ui.play_panel import PlayPanel
+    from vision.recognition import make_template
 
-    hud = PlayHud()
+    class _NoOpInputBackend:
+        def tap_key(self, key, hold_ms: int = 40) -> None:
+            pass
+
+        def release_all(self) -> None:
+            pass
+
+    # The real pynput-backed input backend needs a live X/Wayland display to even construct
+    # (raises ImportError otherwise, as it does in this offscreen test environment); swapping
+    # it for a no-op keeps this test about panel embedding, not display availability. dry_run
+    # additionally guarantees tap_key is never called at all regardless.
+    monkeypatch.setattr(main_window_module, "create_input_backend", lambda use_pydirectinput=False: _NoOpInputBackend())
+
+    store = ProfileStore(tmp_path)
+    store.mark_screen_setup_complete()
+    templates = {1: make_template(1, np.full((64, 64, 3), (200, 190, 180), dtype=np.uint8))}
+    profile = GameProfile(
+        window_title=window_info.title,
+        roi=RoiOffset(0, 0, 320, 320),
+        window_size_at_calibration=(400, 400),
+        tile_templates=templates,
+        settle_frames=1,
+        settle_timeout_ms=300.0,
+        confidence_threshold=0.6,
+    )
+    store.save(profile)
+
+    window = MainWindow(profile_store=store, capture_backend=_FakeCaptureBackend())
+    window.config = AppConfig(dry_run=True, settle_timeout_ms=200.0, settle_frames=1)
+    # Global hotkey registration also needs a live X/Wayland display (pynput.keyboard's
+    # GlobalHotKeys) for the same reason the input backend does; irrelevant to what this test
+    # is checking, so it's stubbed out rather than left to fail into a blocking QMessageBox.
+    window.hotkeys.start = lambda: None
     try:
-        assert bool(hud.windowFlags() & Qt.WindowType.WindowDoesNotAcceptFocus)
+        window._on_window_selected(window_info)
+        assert window.wizard.step is WizardStep.READY_TO_PLAY
+
+        before = {id(w) for w in QApplication.topLevelWidgets()}
+        window._start_playing()
+        after = {id(w) for w in QApplication.topLevelWidgets()}
+
+        assert isinstance(window.play_panel, PlayPanel)
+        assert window._stack.currentWidget() is window.play_panel, "must be embedded in this window's own stack"
+        assert after == before, "starting play must not create any new top-level window"
+
+        window._stop_play()
+        assert window.play_panel is None
+        assert window.wizard.step is WizardStep.READY_TO_PLAY, "Stop must return to the ready-to-play screen"
     finally:
-        hud.close()
+        window.close()
+
+
+def test_arrange_screen_step_is_shown_once_then_skipped(qapp, tmp_path) -> None:
+    """Regression test for direct user feedback: the app must guide the user to lay out their
+    screen (game + this app side by side, never overlapping) once, up front -- but per the
+    wizard's "second run must be zero-setup" rule, it must never ask again once that's done.
+    """
+    from ui.main_window import MainWindow
+    from ui.wizard_arrange_screen import ArrangeScreenPage
+
+    store = ProfileStore(tmp_path)
+    assert store.has_completed_screen_setup() is False
+
+    window = MainWindow(profile_store=store, capture_backend=_FakeCaptureBackend())
+    try:
+        assert window.wizard.step is WizardStep.ARRANGE_SCREEN
+        page = window._stack.currentWidget()
+        assert isinstance(page, ArrangeScreenPage)
+
+        page.arranged.emit()
+        assert window.wizard.step is WizardStep.PICK_WINDOW
+        assert store.has_completed_screen_setup() is True
+    finally:
+        window.close()
+
+    # A fresh MainWindow against the same (now-marked) store must skip straight past it.
+    second_window = MainWindow(profile_store=store, capture_backend=_FakeCaptureBackend())
+    try:
+        assert second_window.wizard.step is WizardStep.PICK_WINDOW
+    finally:
+        second_window.close()
 
 
 def test_tile_learning_page_shows_tile_thumbnails_and_lets_user_reject_a_wrong_ranking(qapp) -> None:

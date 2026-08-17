@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 class WizardStep(Enum):
     PERMISSIONS = auto()  # macOS only; skipped entirely elsewhere
+    ARRANGE_SCREEN = auto()  # first run only; skipped once ProfileStore has a completion marker
     PICK_WINDOW = auto()
     CONFIRM_GRID = auto()
     LEARN_TILES = auto()
@@ -64,6 +65,14 @@ class WizardStateMachine:
             statuses = get_permission_statuses()
             if any(not s.granted for s in statuses):
                 return WizardStep.PERMISSIONS
+        return self._step_after_permissions()
+
+    def _step_after_permissions(self) -> WizardStep:
+        # Screen arrangement is a one-time installation-wide setup step (marked complete in
+        # the profile store, not per-game), not something to repeat on every launch -- see the
+        # module docstring's "second run must be zero-setup" requirement.
+        if not self.profile_store.has_completed_screen_setup():
+            return WizardStep.ARRANGE_SCREEN
         return WizardStep.PICK_WINDOW
 
     def try_resume_from_profile(self, window_title: str) -> GameProfile | None:
@@ -76,6 +85,12 @@ class WizardStateMachine:
     def advance_from_permissions(self) -> None:
         if self.step is not WizardStep.PERMISSIONS:
             raise RuntimeError(f"advance_from_permissions() called from {self.step}")
+        self.step = self._step_after_permissions()
+
+    def advance_from_arrange_screen(self) -> None:
+        if self.step is not WizardStep.ARRANGE_SCREEN:
+            raise RuntimeError(f"advance_from_arrange_screen() called from {self.step}")
+        self.profile_store.mark_screen_setup_complete()
         self.step = WizardStep.PICK_WINDOW
 
     def select_window(self, window_title: str, window_bounds: tuple[int, int, int, int], scale_factor: float) -> None:

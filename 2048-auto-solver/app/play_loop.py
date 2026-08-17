@@ -85,7 +85,7 @@ class PlayStats:
 
 @dataclass
 class PlayEvent:
-    """One notification for the UI's HUD; see ``ui/play_hud.py`` for consumption."""
+    """One notification for the UI's play panel; see ``ui/play_panel.py`` for consumption."""
 
     kind: str
     state: PlayState

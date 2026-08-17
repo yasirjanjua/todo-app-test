@@ -32,8 +32,9 @@ see [Building from source](#building-from-source) below).
    a **Relaunch now** button the moment it detects the permission was granted — macOS requires
    a fresh process launch for a new permission grant to take effect, so this step can't be
    skipped.
-3. Click **Find my game**, pick your game window from the pictures shown, confirm the
-   highlighted grid, and click **Start**.
+3. On first run, arrange your screen when prompted (game + app side by side), then click
+   **Find my game**, pick your game window from the pictures shown, confirm the highlighted
+   grid, and click **Start**.
 
 > **Note on code signing:** the pre-built `.dmg` released from this project's CI is *not*
 > notarized (that requires a paid Apple Developer account, which this project does not have).
@@ -46,7 +47,8 @@ see [Building from source](#building-from-source) below).
 ### Windows
 
 1. Download and unzip the release, then run `2048AutoSolver.exe`.
-2. Click **Find my game**, pick your window, confirm the grid, click **Start**. There is no
+2. On first run, arrange your screen when prompted (game + app side by side), then click
+   **Find my game**, pick your window, confirm the grid, click **Start**. There is no
    permission step on Windows.
 
 > **Note on antivirus false positives:** Windows Defender (or your third-party antivirus) may
@@ -63,13 +65,20 @@ see [Building from source](#building-from-source) below).
 ### Linux (X11)
 
 1. Make the AppImage executable and run it: `chmod +x 2048AutoSolver-x86_64.AppImage && ./2048AutoSolver-x86_64.AppImage`.
-2. Click **Find my game**, pick your window, confirm the grid, click **Start**.
+2. On first run, arrange your screen when prompted (game + app side by side), then click
+   **Find my game**, pick your window, confirm the grid, click **Start**.
 
 Wayland is not supported for capture or window enumeration in this release — run under Xorg,
 or an XWayland session, if your desktop defaults to Wayland.
 
 ## Using it
 
+0. **Set up your screen** (first run only) — the app asks you to arrange your game window and
+   this app's window side by side (roughly 70% game / 30% app), with a button to snap the app
+   window into the remaining third automatically. This isn't cosmetic: if this app's own
+   window ever ends up on top of the game board, the screenshot it takes includes its own
+   pixels instead of the board underneath, which the recognizer then misreads as tiles. Shown
+   once per install, never again after that.
 1. **Find my game** — the app lists every visible window with a live thumbnail; click yours.
    (If you've played this exact window title before, this step is skipped entirely — the app
    remembers.)
@@ -82,15 +91,17 @@ or an XWayland session, if your desktop defaults to Wayland.
    involved. If you're already mid-game, use the "I'm already mid-game" option instead. If it
    ever reports seeing an implausible number of different tiles at once, it stops and offers a
    **Fix the grid region** button rather than learning garbage — see Troubleshooting.
-4. **Start** — a small floating panel appears showing the board the app currently sees, its
-   chosen move, search depth/decision time, and moves/sec, plus **Pause**, **Stop**, and
-   **Save Snapshot** buttons. On Windows and Linux these also work as global hotkeys even
-   while the game window has focus:
+4. **Start** — the app's own window switches to a play view showing the board it currently
+   sees, its chosen move, search depth/decision time, and moves/sec, plus **Pause**, **Stop**,
+   and **Save Snapshot** buttons. This is the same window as every other step, not a separate
+   floating panel — it can't end up on top of the game board, because that's exactly what step
+   0 above set up your screen to prevent. On Windows and Linux these also work as global
+   hotkeys even while the game window has focus:
    - `P` — pause / resume
    - `Q` — stop (always releases any held key, even mid-move)
    - `S` — save a debug snapshot of the current board crop, for troubleshooting a misread
 
-   **On macOS, global hotkeys are off by default** (see the note below) — use the HUD's
+   **On macOS, global hotkeys are off by default** (see the note below) — use the on-screen
    buttons instead, which work identically and don't need focus on any particular window.
 
 Recalibrate any time from the "ready to play" screen if you change your browser zoom, theme,
@@ -100,8 +111,8 @@ or window size.
 > character through a macOS keyboard-layout API that, on some macOS versions, asserts it's
 > only ever called from the main thread and hard-crashes the whole app otherwise -- a crash no
 > amount of Python error handling can catch, since it's an OS-level abort, not a Python
-> exception. Rather than risk that, global hotkeys are disabled by default on macOS; the HUD's
-> Pause/Stop/Save Snapshot buttons cover the same functionality without touching the affected
+> exception. Rather than risk that, global hotkeys are disabled by default on macOS; the play
+> view's Pause/Stop/Save Snapshot buttons cover the same functionality without touching the affected
 > code path at all. If you want to try enabling them anyway, set
 > `AppConfig.enable_macos_global_hotkeys = True` in your own launch script -- expect a possible
 > crash on some macOS versions.
@@ -119,7 +130,7 @@ covering almost all of it, with a warning above it), it opens straight into adju
 *requires* you to drag the box down to just the 4x4 grid before continuing — don't click
 **Looks right** without actually checking in this case. Proceeding with an oversized box means
 every "tile" the app learns afterward is really just random webpage content around the board,
-which shows up as implausible values in the HUD (see the next entry) and gets nowhere.
+which shows up as implausible values in the play view (see the next entry) and gets nowhere.
 
 **The app pauses with "Saw a tile I can't place even after trying to learn it."** A new tile
 tier the recognizer has never seen is normally learned automatically and silently mid-play —
@@ -129,7 +140,7 @@ that way (most commonly: calibration was finished before the tier-2 confirmation
 came up). Press `S` to save the offending crop for inspection, then use **Recalibrate** and
 re-run tile learning.
 
-**The HUD shows huge, implausible tile values (e.g. 2048, 32768) on a game that just
+**The play view shows huge, implausible tile values (e.g. 2048, 32768) on a game that just
 started, or pauses saying "This doesn't look like the game board anymore."** This means
 recognition itself has gone unreliable, almost always because the calibrated region is no
 longer actually looking at the board — most commonly a page reflow (an ad loading, a layout
@@ -222,7 +233,7 @@ vision/     Perception: grid detection, tile recognition, tile learning, frame-s
 backends/   Per-OS capture (mss/dxcam) and input (pynput/pydirectinput) implementations,
             hidden behind OS-agnostic protocols. All platform-specific code lives here.
 app/        Wires the above together: profiles, the wizard state machine, the play loop.
-ui/         PySide6 wizard, play HUD, global hotkeys, advanced settings panel.
+ui/         PySide6 wizard, embedded play panel, global hotkeys, advanced settings panel.
 tests/      Unit tests for core/ (fixed boards) plus an integration smoke test for the
             closed-loop play controller against a fake in-memory game.
 ```

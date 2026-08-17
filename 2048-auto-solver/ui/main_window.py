@@ -24,7 +24,8 @@ from ui.main_thread_input import MainThreadInputBackend
 from backends.window_enum import OWN_WINDOW_TITLE, enumerate_windows
 from ui.advanced_panel import AdvancedPanel
 from ui.hotkeys import GlobalHotkeys
-from ui.play_hud import PlayHud
+from ui.play_panel import PlayPanel
+from ui.wizard_arrange_screen import ArrangeScreenPage
 from ui.wizard_grid_confirm import GridConfirmPage
 from ui.wizard_window_picker import WindowPickerPage
 from vision.capture import Roi
@@ -35,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 
 class MainWindow(QMainWindow):
-    """Owns the wizard's QStackedWidget and, once calibrated, the play HUD and controller."""
+    """Owns the wizard's QStackedWidget and, once calibrated, the play panel and controller."""
 
     # PlayController invokes its on_event callback from the play loop's background thread.
     # A Signal(object) accepts an arbitrary Python payload (a PlayEvent) and Qt's default
@@ -70,7 +71,7 @@ class MainWindow(QMainWindow):
         # (clicking it never actually let them redo tile learning).
         self._force_recalibration = False
 
-        self.hud: PlayHud | None = None
+        self.play_panel: PlayPanel | None = None
         self.play_controller: PlayController | None = None
         self.hotkeys = GlobalHotkeys(self.config.hotkeys, self)
         self.hotkeys.pause_resume_pressed.connect(self._toggle_pause)
@@ -94,6 +95,8 @@ class MainWindow(QMainWindow):
         try:
             if self.wizard.step is WizardStep.PERMISSIONS:
                 self._show_permissions_step()
+            elif self.wizard.step is WizardStep.ARRANGE_SCREEN:
+                self._show_arrange_screen_step()
             elif self.wizard.step is WizardStep.PICK_WINDOW:
                 self._show_window_picker_step()
             elif self.wizard.step is WizardStep.CONFIRM_GRID:
@@ -121,6 +124,15 @@ class MainWindow(QMainWindow):
 
     def _advance_from_permissions(self) -> None:
         self.wizard.advance_from_permissions()
+        self._enter_current_step()
+
+    def _show_arrange_screen_step(self) -> None:
+        page = ArrangeScreenPage(self)
+        page.arranged.connect(self._advance_from_arrange_screen)
+        self._swap_page(page)
+
+    def _advance_from_arrange_screen(self) -> None:
+        self.wizard.advance_from_arrange_screen()
         self._enter_current_step()
 
     def _show_window_picker_step(self) -> None:
@@ -306,10 +318,10 @@ class MainWindow(QMainWindow):
         # calls where macOS needs them. See ui/main_thread_input.py.
         raw_input_backend = create_input_backend(use_pydirectinput=self.wizard.data.use_pydirectinput)
         input_backend = MainThreadInputBackend(raw_input_backend, self)
-        self.hud = PlayHud()
-        self.hud.pause_button.clicked.connect(self._toggle_pause)
-        self.hud.stop_button.clicked.connect(self._stop_play)
-        self.hud.save_snapshot_button.clicked.connect(self._save_debug_snapshot)
+        self.play_panel = PlayPanel(self)
+        self.play_panel.pause_button.clicked.connect(self._toggle_pause)
+        self.play_panel.stop_button.clicked.connect(self._stop_play)
+        self.play_panel.save_snapshot_button.clicked.connect(self._save_debug_snapshot)
 
         self.play_controller = PlayController(
             capture_backend=self.capture_backend,
@@ -325,10 +337,13 @@ class MainWindow(QMainWindow):
         else:
             logger.info(
                 "Skipping global hotkey registration on macOS (see AppConfig."
-                "enable_macos_global_hotkeys); use the HUD's Pause/Stop/Save Snapshot buttons instead."
+                "enable_macos_global_hotkeys); use the play panel's Pause/Stop/Save Snapshot buttons instead."
             )
         self.play_controller.start()
-        self.hud.show()
+        # Replaces whatever's currently shown (the ready-to-play screen) with the play panel,
+        # in this same window's central stack -- not a separate floating window (see
+        # ui/play_panel.py's docstring for why that used to cause real recognition failures).
+        self._swap_page(self.play_panel)
 
     def _on_play_event(self, event: PlayEvent) -> None:
         # Called directly from PlayController on the play loop's background thread; hop onto
@@ -336,8 +351,8 @@ class MainWindow(QMainWindow):
         self._play_event_received.emit(event)
 
     def _handle_play_event(self, event: PlayEvent) -> None:
-        if self.hud is not None:
-            self.hud.on_play_event(event)
+        if self.play_panel is not None:
+            self.play_panel.on_play_event(event)
         if event.kind == "game_over":
             logger.info(event.message)
 
@@ -350,12 +365,19 @@ class MainWindow(QMainWindow):
             self.play_controller.resume()
 
     def _stop_play(self) -> None:
+        # Only rebuild the wizard's current page if the play panel is actually the thing on
+        # screen right now -- _stop_play() also runs from closeEvent() regardless of whether
+        # play was ever started, and rebuilding UI mid-shutdown for no reason is just wasted
+        # work (see _swap_page's deleteLater()-based teardown, which still runs fine here but
+        # has nothing useful to show for it).
+        was_playing = self.play_panel is not None and self._stack.currentWidget() is self.play_panel
         if self.play_controller is not None:
             self.play_controller.stop()
         self.hotkeys.stop_listening()
-        if self.hud is not None:
-            self.hud.close()
         self._save_profile_if_learned_new_tiles()
+        self.play_panel = None
+        if was_playing:
+            self._enter_current_step()
 
     def _save_profile_if_learned_new_tiles(self) -> None:
         # PlayController shares wizard.data.tile_learner by reference, so any tiles learned
