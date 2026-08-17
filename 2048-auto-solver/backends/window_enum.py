@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import difflib
 import logging
+import os
 import sys
 from dataclasses import dataclass
 
@@ -53,6 +54,12 @@ class WindowInfo:
     height: int
     thumbnail: np.ndarray | None  # small BGR preview for the visual picker, or None if unavailable
     match_score: float  # 0.0-1.0, how strongly the title suggests this is a 2048 game
+    pid: int | None  # owning process ID, when the platform can report it
+
+
+# The window picker's own title, set once in ui/main_window.py; used as a last-resort filter
+# for the app's own window when a platform can't report an owning PID for comparison.
+OWN_WINDOW_TITLE = "2048 Auto-Solver"
 
 
 def _title_match_score(title: str) -> float:
@@ -75,16 +82,30 @@ def _is_real_window(title: str, width: int, height: int) -> bool:
     return width >= 200 and height >= 150
 
 
-def _enumerate_windows_windows() -> list[tuple[int, str, int, int, int, int]]:
+def _pid_for_hwnd_windows(hwnd: int) -> int | None:
+    try:
+        import ctypes
+
+        pid = ctypes.c_ulong()
+        ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        return pid.value or None
+    except Exception:  # noqa: BLE001 - PID is a best-effort filter, never worth failing enumeration over
+        return None
+
+
+def _enumerate_windows_windows() -> list[tuple[int, str, int, int, int, int, int | None]]:
     """Windows enumeration via ``pygetwindow`` (its only supported non-macOS platform)."""
     import pygetwindow  # local import: optional dependency, not needed outside this function
 
-    raw: list[tuple[int, str, int, int, int, int]] = []
+    raw: list[tuple[int, str, int, int, int, int, int | None]] = []
     for win in pygetwindow.getAllWindows():
         try:
             if not win.visible or win.isMinimized:
                 continue
-            raw.append((hash(win._hWnd) if hasattr(win, "_hWnd") else id(win), win.title, win.left, win.top, win.width, win.height))
+            hwnd = win._hWnd if hasattr(win, "_hWnd") else None
+            window_id = hash(hwnd) if hwnd is not None else id(win)
+            pid = _pid_for_hwnd_windows(hwnd) if hwnd is not None else None
+            raw.append((window_id, win.title, win.left, win.top, win.width, win.height, pid))
         except Exception:  # noqa: BLE001 - a single misbehaving window handle must not abort enumeration
             logger.debug("Skipping a window that raised during enumeration", exc_info=True)
     return raw
@@ -111,6 +132,19 @@ def _window_title_x11(display, window) -> str:
         return ""
 
 
+def _window_pid_x11(display, window) -> int | None:
+    from Xlib.error import XError
+
+    try:
+        net_wm_pid = display.intern_atom("_NET_WM_PID")
+        prop = window.get_full_property(net_wm_pid, 0)  # 0 == Xlib.X.AnyPropertyType
+        if prop and prop.value:
+            return int(prop.value[0])
+    except XError:
+        pass
+    return None
+
+
 def _window_geometry_x11(display, root, window) -> tuple[int, int, int, int] | None:
     from Xlib.error import XError
 
@@ -128,7 +162,7 @@ def _window_geometry_x11(display, root, window) -> tuple[int, int, int, int] | N
         return None
 
 
-def _enumerate_via_ewmh(display, root) -> list[tuple[int, str, int, int, int, int]]:
+def _enumerate_via_ewmh(display, root) -> list[tuple[int, str, int, int, int, int, int | None]]:
     """Preferred X11 path: ask the window manager for its authoritative client list."""
     from Xlib import X
 
@@ -137,7 +171,7 @@ def _enumerate_via_ewmh(display, root) -> list[tuple[int, str, int, int, int, in
     if response is None or not response.value:
         return []
 
-    raw: list[tuple[int, str, int, int, int, int]] = []
+    raw: list[tuple[int, str, int, int, int, int, int | None]] = []
     for window_id in response.value:
         window = display.create_resource_object("window", window_id)
         title = _window_title_x11(display, window)
@@ -145,17 +179,18 @@ def _enumerate_via_ewmh(display, root) -> list[tuple[int, str, int, int, int, in
         if geometry is None:
             continue
         left, top, width, height = geometry
-        raw.append((window_id, title, left, top, width, height))
+        pid = _window_pid_x11(display, window)
+        raw.append((window_id, title, left, top, width, height, pid))
     return raw
 
 
-def _enumerate_via_tree_walk(display, root) -> list[tuple[int, str, int, int, int, int]]:
+def _enumerate_via_tree_walk(display, root) -> list[tuple[int, str, int, int, int, int, int | None]]:
     """Fallback for window managers (or no window manager at all) that skip EWMH: walk the
     root window's direct children and keep the ones that are actually mapped on screen."""
     from Xlib import X
     from Xlib.error import XError
 
-    raw: list[tuple[int, str, int, int, int, int]] = []
+    raw: list[tuple[int, str, int, int, int, int, int | None]] = []
     try:
         tree = root.query_tree()
     except XError:
@@ -173,11 +208,12 @@ def _enumerate_via_tree_walk(display, root) -> list[tuple[int, str, int, int, in
         if geometry is None:
             continue
         left, top, width, height = geometry
-        raw.append((window.id, title, left, top, width, height))
+        pid = _window_pid_x11(display, window)
+        raw.append((window.id, title, left, top, width, height, pid))
     return raw
 
 
-def _enumerate_windows_linux() -> list[tuple[int, str, int, int, int, int]]:
+def _enumerate_windows_linux() -> list[tuple[int, str, int, int, int, int, int | None]]:
     """X11 enumeration via ``python-xlib``. No Linux support exists in ``pygetwindow`` (it
     raises ``NotImplementedError`` on import there), so this talks to the X server directly:
     first via the EWMH ``_NET_CLIENT_LIST`` a compliant window manager maintains, falling back
@@ -196,18 +232,19 @@ def _enumerate_windows_linux() -> list[tuple[int, str, int, int, int, int]]:
         display.close()
 
 
-def _enumerate_windows_macos() -> list[tuple[int, str, int, int, int, int]]:
+def _enumerate_windows_macos() -> list[tuple[int, str, int, int, int, int, int | None]]:
     """macOS enumeration via Quartz's window server (no ``pygetwindow`` support there)."""
     import Quartz  # local import: optional dependency (pyobjc-framework-Quartz), macOS-only
 
     options = Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements
     window_list = Quartz.CGWindowListCopyWindowInfo(options, Quartz.kCGNullWindowID)
-    raw: list[tuple[int, str, int, int, int, int]] = []
+    raw: list[tuple[int, str, int, int, int, int, int | None]] = []
     for entry in window_list:
         title = entry.get("kCGWindowName", "") or ""
         owner = entry.get("kCGWindowOwnerName", "") or ""
         bounds = entry.get("kCGWindowBounds")
         window_id = entry.get("kCGWindowNumber", 0)
+        pid = entry.get("kCGWindowOwnerPID")
         if not bounds:
             continue
         display_title = title or owner
@@ -219,13 +256,15 @@ def _enumerate_windows_macos() -> list[tuple[int, str, int, int, int, int]]:
                 int(bounds["Y"]),
                 int(bounds["Width"]),
                 int(bounds["Height"]),
+                int(pid) if pid is not None else None,
             )
         )
     return raw
 
 
-def enumerate_windows() -> list[tuple[int, str, int, int, int, int]]:
-    """Return raw ``(window_id, title, left, top, width, height)`` tuples for visible windows."""
+def enumerate_windows() -> list[tuple[int, str, int, int, int, int, int | None]]:
+    """Return raw ``(window_id, title, left, top, width, height, pid)`` tuples for visible
+    windows. ``pid`` is ``None`` when the platform couldn't report an owning process."""
     if sys.platform == "darwin":
         return _enumerate_windows_macos()
     if sys.platform == "win32":
@@ -236,6 +275,11 @@ def enumerate_windows() -> list[tuple[int, str, int, int, int, int]]:
 def list_candidate_windows(capture_thumbnail: bool = True, thumbnail_max_dim: int = 220) -> list[WindowInfo]:
     """Enumerate real, on-screen application windows, best 2048-title-match first.
 
+    The app's own window is excluded -- there is never a reason to "play" the bot's own
+    wizard, and showing it in the picker (sometimes with a confusing recursive-looking
+    thumbnail) is just noise. Filtering is PID-based where the platform can report an owning
+    process; :data:`OWN_WINDOW_TITLE` is a fallback for the rare case a platform can't.
+
     Thumbnails are captured through the normal capture backend (same code path the play loop
     uses) so what the picker shows the user is exactly what recognition will see, including
     any DPI scaling quirks.
@@ -245,10 +289,15 @@ def list_candidate_windows(capture_thumbnail: bool = True, thumbnail_max_dim: in
 
     capture_backend = create_capture_backend() if capture_thumbnail else None
     scale = capture_backend.get_scale_factor() if capture_backend else 1.0
+    own_pid = os.getpid()
 
     results: list[WindowInfo] = []
-    for window_id, title, left, top, width, height in enumerate_windows():
+    for window_id, title, left, top, width, height, pid in enumerate_windows():
         if not _is_real_window(title, width, height):
+            continue
+        if pid is not None and pid == own_pid:
+            continue
+        if pid is None and title.strip() == OWN_WINDOW_TITLE:
             continue
 
         thumbnail: np.ndarray | None = None
@@ -275,6 +324,7 @@ def list_candidate_windows(capture_thumbnail: bool = True, thumbnail_max_dim: in
                 height=height,
                 thumbnail=thumbnail,
                 match_score=_title_match_score(title),
+                pid=pid,
             )
         )
 

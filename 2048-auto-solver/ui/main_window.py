@@ -20,6 +20,7 @@ from app.state_machine import WizardStateMachine, WizardStep
 from backends.capture.base import CaptureRegion
 from backends.capture.factory import create_capture_backend
 from backends.input.factory import create_input_backend
+from backends.window_enum import OWN_WINDOW_TITLE
 from ui.advanced_panel import AdvancedPanel
 from ui.hotkeys import GlobalHotkeys
 from ui.play_hud import PlayHud
@@ -37,7 +38,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self, config: AppConfig | None = None, profile_store: ProfileStore | None = None) -> None:
         super().__init__()
-        self.setWindowTitle("2048 Auto-Solver")
+        self.setWindowTitle(OWN_WINDOW_TITLE)
         self.resize(720, 640)
 
         self.config = config or AppConfig()
