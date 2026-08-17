@@ -81,10 +81,15 @@ class PlayHud(QWidget):
         buttons = QHBoxLayout()
         self.pause_button = QPushButton("Pause", self)
         self.stop_button = QPushButton("Stop", self)
-        for button in (self.pause_button, self.stop_button):
+        # Mirrors the "S" global hotkey via a mouse click, since global hotkeys are off by
+        # default on macOS (see AppConfig.enable_macos_global_hotkeys) -- this keeps the
+        # snapshot feature reachable without depending on pynput's listener at all.
+        self.save_snapshot_button = QPushButton("Save Snapshot", self)
+        for button in (self.pause_button, self.stop_button, self.save_snapshot_button):
             button.setMinimumHeight(36)
         buttons.addWidget(self.pause_button)
         buttons.addWidget(self.stop_button)
+        buttons.addWidget(self.save_snapshot_button)
         outer.addLayout(buttons)
 
         self.setStyleSheet("background-color: rgba(20,20,26,235); border-radius: 8px;")

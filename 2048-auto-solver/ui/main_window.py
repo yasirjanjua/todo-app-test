@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import sys
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QMainWindow, QMessageBox, QPushButton, QStackedWidget, QVBoxLayout, QWidget
 
 from app.config import AppConfig
@@ -37,10 +37,20 @@ logger = logging.getLogger(__name__)
 class MainWindow(QMainWindow):
     """Owns the wizard's QStackedWidget and, once calibrated, the play HUD and controller."""
 
+    # PlayController invokes its on_event callback from the play loop's background thread.
+    # A Signal(object) accepts an arbitrary Python payload (a PlayEvent) and Qt's default
+    # AutoConnection resolves to a queued, cross-thread-safe delivery automatically since the
+    # emitting thread differs from this QObject's own (main) thread -- unlike
+    # QMetaObject.invokeMethod with Q_ARG(object, ...), which raises at call time because
+    # plain Python objects have no registered Qt meta-type (see ui/main_thread_input.py for
+    # the same lesson applied to keystroke injection).
+    _play_event_received = Signal(object)
+
     def __init__(self, config: AppConfig | None = None, profile_store: ProfileStore | None = None) -> None:
         super().__init__()
         self.setWindowTitle(OWN_WINDOW_TITLE)
         self.resize(720, 640)
+        self._play_event_received.connect(self._handle_play_event)
 
         self.config = config or AppConfig()
         self.profile_store = profile_store or ProfileStore()
@@ -204,6 +214,7 @@ class MainWindow(QMainWindow):
         self.hud = PlayHud()
         self.hud.pause_button.clicked.connect(self._toggle_pause)
         self.hud.stop_button.clicked.connect(self._stop_play)
+        self.hud.save_snapshot_button.clicked.connect(self._save_debug_snapshot)
 
         self.play_controller = PlayController(
             capture_backend=self.capture_backend,
@@ -213,17 +224,24 @@ class MainWindow(QMainWindow):
             app_config=self.config,
             on_event=self._on_play_event,
         )
-        self.hotkeys.start()
+        if sys.platform != "darwin" or self.config.enable_macos_global_hotkeys:
+            self.hotkeys.start()
+        else:
+            logger.info(
+                "Skipping global hotkey registration on macOS (see AppConfig."
+                "enable_macos_global_hotkeys); use the HUD's Pause/Stop/Save Snapshot buttons instead."
+            )
         self.play_controller.start()
         self.hud.show()
 
     def _on_play_event(self, event: PlayEvent) -> None:
-        # PlayController runs its loop on a background thread; forward to the GUI thread via
-        # Qt's queued-connection machinery rather than touching widgets directly here.
-        if self.hud is not None:
-            from PySide6.QtCore import QMetaObject, Q_ARG, Qt as QtNS
+        # Called directly from PlayController on the play loop's background thread; hop onto
+        # the main thread via _play_event_received before touching any widget.
+        self._play_event_received.emit(event)
 
-            QMetaObject.invokeMethod(self.hud, "on_play_event", QtNS.ConnectionType.QueuedConnection, Q_ARG(object, event))
+    def _handle_play_event(self, event: PlayEvent) -> None:
+        if self.hud is not None:
+            self.hud.on_play_event(event)
         if event.kind == "game_over":
             logger.info(event.message)
 

@@ -80,14 +80,28 @@ or an XWayland session, if your desktop defaults to Wayland.
    typing or labeling involved. If you're already mid-game, use the "I'm already mid-game"
    option instead.
 4. **Start** — a small floating panel appears showing the board the app currently sees, its
-   chosen move, search depth/decision time, and moves/sec. Global hotkeys work even while the
-   game window has focus:
+   chosen move, search depth/decision time, and moves/sec, plus **Pause**, **Stop**, and
+   **Save Snapshot** buttons. On Windows and Linux these also work as global hotkeys even
+   while the game window has focus:
    - `P` — pause / resume
    - `Q` — stop (always releases any held key, even mid-move)
    - `S` — save a debug snapshot of the current board crop, for troubleshooting a misread
 
+   **On macOS, global hotkeys are off by default** (see the note below) — use the HUD's
+   buttons instead, which work identically and don't need focus on any particular window.
+
 Recalibrate any time from the "ready to play" screen if you change your browser zoom, theme,
 or window size.
+
+> **Note on macOS global hotkeys:** the underlying library (`pynput`) resolves each hotkey
+> character through a macOS keyboard-layout API that, on some macOS versions, asserts it's
+> only ever called from the main thread and hard-crashes the whole app otherwise -- a crash no
+> amount of Python error handling can catch, since it's an OS-level abort, not a Python
+> exception. Rather than risk that, global hotkeys are disabled by default on macOS; the HUD's
+> Pause/Stop/Save Snapshot buttons cover the same functionality without touching the affected
+> code path at all. If you want to try enabling them anyway, set
+> `AppConfig.enable_macos_global_hotkeys = True` in your own launch script -- expect a possible
+> crash on some macOS versions.
 
 ## Troubleshooting
 

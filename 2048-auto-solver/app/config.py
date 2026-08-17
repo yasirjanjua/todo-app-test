@@ -72,3 +72,14 @@ class AppConfig:
     key_hold_ms: int = 40
     hotkeys: HotkeyBindings = field(default_factory=HotkeyBindings)
     heuristic_weights: HeuristicWeights = field(default_factory=lambda: DEFAULT_WEIGHTS)
+
+    # pynput's GlobalHotKeys resolves each hotkey character (e.g. "p") via KeyCode.from_char(),
+    # which on macOS can call into the same HIToolbox Text Services Manager API that crashes
+    # the process when touched off the main thread (see ui/main_thread_input.py's docstring
+    # for the keystroke-injection half of this same class of bug). pynput's listener manages
+    # its own internal OS thread for the event tap -- there is no call site of ours to marshal
+    # onto the main thread the way there was for tap_key/release_all, so global hotkeys are
+    # off by default on macOS until this is confirmed fixed upstream. The HUD's Pause/Stop/
+    # Save Snapshot buttons cover the same functionality without touching pynput's listener at
+    # all. Flip this on to try global hotkeys anyway; expect a possible hard crash on macOS.
+    enable_macos_global_hotkeys: bool = False
