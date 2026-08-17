@@ -22,6 +22,7 @@ import imagehash
 import numpy as np
 
 from app.config import get_profiles_dir
+from core.board import MAX_TIER
 from vision.recognition import TileTemplate
 
 logger = logging.getLogger(__name__)
@@ -113,7 +114,25 @@ def profile_from_json(data: dict) -> GameProfile:
     if version != PROFILE_FORMAT_VERSION:
         raise ValueError(f"Unsupported profile format version: {version!r}")
     roi_data = data["roi"]
-    templates = {t["tier"]: _template_from_json(t) for t in data["tile_templates"]}
+    templates: dict[int, TileTemplate] = {}
+    for t in data["tile_templates"]:
+        tier = t["tier"]
+        if not 1 <= tier <= MAX_TIER:
+            # Evidence this is a real, not just theoretical, failure mode: a profile saved by
+            # a build that predates the tile-learning anomaly guard (see
+            # vision/tile_learning.py) can contain templates minted during a runaway-learning
+            # episode, with tiers running well past what a bitboard cell can even represent.
+            # Silently drop them here rather than let a stale file keep reintroducing a crash
+            # that's already fixed going forward -- see resume_for_play()'s next_tier
+            # derivation, which would otherwise start past MAX_TIER on every future load.
+            logger.warning(
+                "Dropping out-of-range tile template (tier=%r) while loading profile %r; "
+                "this profile was likely saved during a recognition-anomaly episode. "
+                "Recalibrating is recommended.",
+                tier, data.get("window_title"),
+            )
+            continue
+        templates[tier] = _template_from_json(t)
     return GameProfile(
         window_title=data["window_title"],
         roi=RoiOffset(roi_data["left"], roi_data["top"], roi_data["width"], roi_data["height"]),
