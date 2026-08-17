@@ -129,6 +129,19 @@ class _GridOverlayWidget(QWidget):
         painter.setBrush(QColor(80, 220, 120, 40))
         painter.drawRect(widget_rect)
 
+        # The 4x4 cell-boundary lines this box implies, so a misalignment (a boundary cutting
+        # through a tile instead of the gap between tiles) is visible right here, before
+        # calibration ever starts -- rather than only inferable later from a flood of
+        # "unrecognized tile" noise once cell crops are actually being sliced along it.
+        if widget_rect.width() > 0 and widget_rect.height() > 0:
+            grid_pen = QPen(QColor(255, 255, 255, 130), 1, Qt.PenStyle.DashLine)
+            painter.setPen(grid_pen)
+            for i in range(1, 4):
+                x = widget_rect.left() + widget_rect.width() * i / 4
+                painter.drawLine(QPointF(x, widget_rect.top()), QPointF(x, widget_rect.bottom()))
+                y = widget_rect.top() + widget_rect.height() * i / 4
+                painter.drawLine(QPointF(widget_rect.left(), y), QPointF(widget_rect.right(), y))
+
         if self._draggable:
             handle_pen = QPen(QColor(255, 255, 255), 2)
             painter.setPen(handle_pen)

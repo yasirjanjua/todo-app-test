@@ -5,27 +5,26 @@ without stealing its focus -- exactly the kind of window PySide6 was chosen for 
 project README). Low-confidence cells (only ever seen transiently, since the play loop pauses
 outright below the confidence threshold rather than rendering a guess) are highlighted so a
 user watching the HUD can see why a pause happened.
+
+It appears as a separate floating window (rather than living inside the main wizard window)
+specifically so it can stay visible on top of the *game's* window, which is typically somewhere
+else on screen entirely -- that only works as a standalone always-on-top panel. "Without
+stealing its focus" used to be aspirational rather than actually enforced: showing this window
+had nothing telling the OS it must never receive keyboard focus, and a real report (all four
+candidate moves failing to change the board for several seconds, over and over, immediately
+after Start) traced back to exactly that -- show() briefly handing OS keyboard focus to this
+window (or our own app generally) instead of the game, so the injected keystrokes were landing
+on nothing useful. WindowDoesNotAcceptFocus is the fix: it tells the OS this window must never
+become key/focused, independent of z-order or visibility.
 """
 
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Slot
-from PySide6.QtGui import QColor, QFont
-from PySide6.QtWidgets import (
-    QFrame,
-    QGridLayout,
-    QHBoxLayout,
-    QLabel,
-    QPushButton,
-    QVBoxLayout,
-    QWidget,
-)
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from app.play_loop import PlayEvent, PlayState
-
-_TIER_BACKGROUND = QColor(50, 50, 60)
-_LOW_CONFIDENCE_BACKGROUND = QColor(180, 60, 60)
-_EMPTY_BACKGROUND = QColor(35, 35, 42)
+from ui.grid_view import TileGridWidget
 
 
 class PlayHud(QWidget):
@@ -37,7 +36,8 @@ class PlayHud(QWidget):
             parent,
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.Tool,
+            | Qt.WindowType.Tool
+            | Qt.WindowType.WindowDoesNotAcceptFocus,
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
         self.setWindowOpacity(0.96)
@@ -48,23 +48,8 @@ class PlayHud(QWidget):
         outer.setContentsMargins(10, 10, 10, 10)
         outer.setSpacing(6)
 
-        self._grid_labels: list[list[QLabel]] = []
-        grid_frame = QFrame(self)
-        grid_layout = QGridLayout(grid_frame)
-        grid_layout.setSpacing(3)
-        for row in range(4):
-            label_row: list[QLabel] = []
-            for col in range(4):
-                cell = QLabel("", grid_frame)
-                cell.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                cell.setFixedSize(40, 40)
-                cell.setFont(QFont("Sans Serif", 11, QFont.Weight.Bold))
-                cell.setAutoFillBackground(True)
-                _set_label_background(cell, _EMPTY_BACKGROUND)
-                grid_layout.addWidget(cell, row, col)
-                label_row.append(cell)
-            self._grid_labels.append(label_row)
-        outer.addWidget(grid_frame)
+        self._grid_widget = TileGridWidget(cell_size=40, parent=self)
+        outer.addWidget(self._grid_widget)
 
         self._move_label = QLabel("Move: -", self)
         self._depth_label = QLabel("Depth: - | Decision: - ms", self)
@@ -114,24 +99,4 @@ class PlayHud(QWidget):
         self.pause_button.setText("Resume" if event.state is PlayState.PAUSED else "Pause")
 
     def _update_grid(self, grid: list[list[int]], low_confidence_cells: tuple[tuple[int, int], ...]) -> None:
-        low_confidence = set(low_confidence_cells)
-        for row in range(4):
-            for col in range(4):
-                tier = grid[row][col]
-                label = self._grid_labels[row][col]
-                if (row, col) in low_confidence:
-                    _set_label_background(label, _LOW_CONFIDENCE_BACKGROUND)
-                    label.setText("?")
-                elif tier == 0:
-                    _set_label_background(label, _EMPTY_BACKGROUND)
-                    label.setText("")
-                else:
-                    _set_label_background(label, _TIER_BACKGROUND)
-                    label.setText(str(1 << tier))
-
-
-def _set_label_background(label: QLabel, color: QColor) -> None:
-    palette = label.palette()
-    palette.setColor(label.backgroundRole(), color)
-    label.setPalette(palette)
-    label.setStyleSheet(f"color: white; background-color: {color.name()}; border-radius: 4px;")
+        self._grid_widget.update_grid(grid, low_confidence_cells=frozenset(low_confidence_cells))

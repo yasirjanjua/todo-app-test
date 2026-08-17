@@ -18,6 +18,14 @@ mid-game ranking confirmation (the one place a *whole batch* of tiles gets accep
 from an automatic frequency guess, rather than one at a time) also gets a real "No, let me redo
 it" path that discards the batch and restarts observation, instead of only ever being able to
 accept it.
+
+A live recognized-board grid (``ui.grid_view.TileGridWidget``, shared with the play HUD) is now
+the primary display, updated every poll: 16 cells in their actual board positions, each showing
+what's currently recognized there (or "new?" if it doesn't match anything yet). Direct user
+feedback was that the toast list alone -- text traces with no spatial context -- was
+unintuitive; seeing the whole board at once, the way the play HUD already shows it during play,
+makes a misaligned grid or a misread tile obvious immediately instead of only inferable from a
+scrolling log.
 """
 
 from __future__ import annotations
@@ -38,6 +46,7 @@ from PySide6.QtWidgets import (
 )
 
 from backends.capture.base import CaptureBackend
+from ui.grid_view import TileGridWidget
 from vision.capture import Roi, capture_board, flatten_cells, split_cells
 from vision.tile_learning import LearningEvent, TileLearner
 
@@ -104,12 +113,22 @@ class TileLearningPage(QWidget):
         layout.addWidget(heading)
 
         preview_row = QHBoxLayout()
-        preview_row.addWidget(QLabel("What I'm currently looking at:", self))
+
+        preview_column = QVBoxLayout()
+        preview_column.addWidget(QLabel("What I'm currently looking at:", self))
         self._preview_label = QLabel(self)
         self._preview_label.setFixedSize(_PREVIEW_MAX_DIM, _PREVIEW_MAX_DIM)
         self._preview_label.setStyleSheet("border: 1px solid #555;")
         self._preview_label.setScaledContents(False)
-        preview_row.addWidget(self._preview_label)
+        preview_column.addWidget(self._preview_label)
+        preview_row.addLayout(preview_column)
+
+        grid_column = QVBoxLayout()
+        grid_column.addWidget(QLabel("What I currently recognize, cell by cell:", self))
+        self._recognized_grid = TileGridWidget(cell_size=44, parent=self)
+        grid_column.addWidget(self._recognized_grid)
+        preview_row.addLayout(grid_column)
+
         preview_row.addStretch(1)
         layout.addLayout(preview_row)
 
@@ -183,6 +202,7 @@ class TileLearningPage(QWidget):
             return
         self._update_preview(frame)
         cells = flatten_cells(split_cells(frame))
+        self._update_recognized_grid(cells)
         events = self._learner.observe(cells)
         for event in events:
             self._handle_event(event)
@@ -192,6 +212,23 @@ class TileLearningPage(QWidget):
         self._preview_label.setPixmap(
             pixmap.scaled(self._preview_label.size(), Qt.AspectRatioMode.KeepAspectRatio)
         )
+
+    def _update_recognized_grid(self, cells: list) -> None:
+        # A plain classify -- read-only against whatever the recognizer knows *so far* -- so
+        # this never itself teaches anything; it only reflects the learner's current state,
+        # the same way the play HUD reflects PlayController's.
+        results = self._learner.recognizer.classify_board(cells)
+        grid = [[0] * 4 for _ in range(4)]
+        unknown: set[tuple[int, int]] = set()
+        for i, result in enumerate(results):
+            row, col = i // 4, i % 4
+            if result.is_empty:
+                continue
+            if result.tier is None:
+                unknown.add((row, col))
+            else:
+                grid[row][col] = result.tier
+        self._recognized_grid.update_grid(grid, unknown_cells=frozenset(unknown))
 
     def _handle_event(self, event: LearningEvent) -> None:
         if event.kind == "learned_tile":

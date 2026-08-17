@@ -17,6 +17,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
 import pytest
+from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMessageBox
 
@@ -253,6 +254,68 @@ def test_tile_learning_page_shows_preview_and_blocks_on_mid_game_anomaly(qapp) -
 
     page._fix_grid_button.click()
     assert recalibrate_requests == [True]
+
+
+def test_tile_learning_page_shows_a_live_recognized_grid_not_just_toasts(qapp) -> None:
+    """Regression test for direct user feedback: "why not display the game grid with
+    identified tiles instead of showing traces?" -- the tile-learning page must show a real
+    4x4 grid of what's currently recognized in each cell, updated live from each poll, not
+    just a scrolling list of "Learned a new tile" toasts with no spatial context.
+    """
+    import cv2
+
+    from backends.capture.base import CaptureRegion
+    from ui.wizard_tile_learning import TileLearningPage
+    from vision.capture import Roi, flatten_cells, split_cells
+    from vision.recognition import make_template
+    from vision.tile_learning import TileLearner
+
+    def _frame_with_one_tile() -> np.ndarray:
+        # A flat color alone reads as an empty background cell (see is_empty_cell's std
+        # threshold); a real tile sprite always has some internal texture, so stamp a digit
+        # onto it, matching how test_play_loop_integration.py's synthetic board renders tiles.
+        frame = np.full((320, 320, 3), (187, 173, 160), dtype=np.uint8)
+        cv2.rectangle(frame, (0, 0), (80, 80), (200, 190, 180), -1)
+        cv2.putText(frame, "2", (20, 55), cv2.FONT_HERSHEY_SIMPLEX, 1.4, (50, 50, 50), 3, cv2.LINE_AA)
+        return frame
+
+    class _KnownTileCaptureBackend:
+        def grab(self, region: CaptureRegion):
+            return _frame_with_one_tile()
+
+    seed_crop = flatten_cells(split_cells(_frame_with_one_tile()))[0]
+
+    learner = TileLearner()
+    learner.recognizer.add_template(make_template(1, seed_crop))
+    page = TileLearningPage(_KnownTileCaptureBackend(), Roi(0, 0, 320, 320), learner)
+
+    # Before any poll, the grid must not falsely claim to recognize anything.
+    assert all(cell.text() == "" for row in page._recognized_grid._labels for cell in row)
+
+    page._poll_once()
+
+    top_left_label = page._recognized_grid._labels[0][0]
+    assert top_left_label.text() == "2", "the known tier-1 tile must show as its board value"
+    other_labels = [
+        cell for r, row in enumerate(page._recognized_grid._labels) for c, cell in enumerate(row) if (r, c) != (0, 0)
+    ]
+    assert all(cell.text() == "" for cell in other_labels), "empty cells must show as empty, not unknown"
+
+
+def test_hud_never_accepts_keyboard_focus(qapp) -> None:
+    """Regression test for a real report: all four candidate moves failed to change the board,
+    repeatedly, for several seconds immediately after Start -- traced to PlayHud.show() handing
+    OS keyboard focus to our own app instead of leaving it on the game window, so the injected
+    keystrokes landed on nothing useful. The HUD is an always-on-top overlay; it must never be
+    focusable, independent of z-order or visibility.
+    """
+    from ui.play_hud import PlayHud
+
+    hud = PlayHud()
+    try:
+        assert bool(hud.windowFlags() & Qt.WindowType.WindowDoesNotAcceptFocus)
+    finally:
+        hud.close()
 
 
 def test_tile_learning_page_shows_tile_thumbnails_and_lets_user_reject_a_wrong_ranking(qapp) -> None:
