@@ -63,6 +63,12 @@ class MainWindow(QMainWindow):
         # Injectable so tests can exercise the wizard/UI without a real display server (the
         # default mss backend needs one to open a screen-capture connection at all).
         self.capture_backend = capture_backend or create_capture_backend(prefer_dxcam=self.config.prefer_dxcam)
+        # Set by _recalibrate() and consumed by _on_window_selected(): without this, picking
+        # the same window again after clicking Recalibrate would immediately re-match the very
+        # profile the user is trying to replace and bounce straight back to the ready-to-play
+        # screen -- Recalibrate would be a silent no-op, which is exactly what a real user hit
+        # (clicking it never actually let them redo tile learning).
+        self._force_recalibration = False
 
         self.hud: PlayHud | None = None
         self.play_controller: PlayController | None = None
@@ -125,6 +131,16 @@ class MainWindow(QMainWindow):
     def _on_window_selected(self, window_info) -> None:
         scale_factor = self.capture_backend.get_scale_factor()
         bounds = (window_info.left, window_info.top, window_info.width, window_info.height)
+
+        if self._force_recalibration:
+            # The user explicitly asked to redo calibration for this window; matching the
+            # very profile they're trying to replace and silently bouncing back to
+            # ready-to-play would make the Recalibrate button do nothing at all. Go through
+            # the full wizard instead -- it overwrites the saved profile on completion.
+            self._force_recalibration = False
+            self.wizard.select_window(window_info.title, bounds, scale_factor)
+            self._enter_current_step()
+            return
 
         existing_profile = self.wizard.try_resume_from_profile(window_info.title)
         if existing_profile is not None:
@@ -223,6 +239,7 @@ class MainWindow(QMainWindow):
         self._swap_page(container)
 
     def _recalibrate(self) -> None:
+        self._force_recalibration = True
         self.wizard.request_recalibration()
         self._enter_current_step()
 

@@ -95,13 +95,17 @@ def test_revisiting_ready_to_play_repeatedly_does_not_crash(qapp, tmp_path, wind
         window._on_window_selected(window_info)
         assert window.wizard.step is WizardStep.READY_TO_PLAY
 
-        # Recalibrate -> revisit, several times, each with a real event-loop pump so the
+        # Revisit the ready-to-play screen several times (as happens naturally via
+        # Stop -> Start, or navigating away and back), each with a real event-loop pump so the
         # deferred deletion that caused the crash actually gets a chance to run (a plain
         # QApplication.processEvents() loop doesn't reliably trigger it; QTest.qWait does).
+        # Recalibrate isn't used to loop back here since it deliberately routes through the
+        # full wizard now (see test_recalibrate_actually_redoes_the_wizard_instead_of_bouncing_back);
+        # jumping wizard.step directly isolates this test to the widget-lifecycle bug alone.
         for _ in range(4):
-            window._recalibrate()
             QTest.qWait(200)
-            window._on_window_selected(window_info)
+            window.wizard.step = WizardStep.READY_TO_PLAY
+            window._enter_current_step()
             assert window.wizard.step is WizardStep.READY_TO_PLAY
     finally:
         window.close()
@@ -129,5 +133,58 @@ def test_step_handler_exception_shows_message_instead_of_crashing(qapp, tmp_path
         window._enter_current_step()  # must not raise
 
         assert len(shown) == 1
+    finally:
+        window.close()
+
+
+def test_recalibrate_actually_redoes_the_wizard_instead_of_bouncing_back(qapp, tmp_path, window_info) -> None:
+    """Regression test for a real report: clicking Recalibrate, then picking the same window
+    again, landed straight back on the "ready to play" screen with the old profile still
+    loaded -- Recalibrate was a silent no-op. Root cause: _on_window_selected() always checked
+    for and auto-resumed an existing saved profile match, with no way to tell "the user just
+    clicked Recalibrate for this exact window" apart from an ordinary first-time selection.
+    """
+    from app.profile import GameProfile, RoiOffset
+    from ui.main_window import MainWindow
+    from vision.recognition import make_template
+
+    store = ProfileStore(tmp_path)
+    # A profile with templates already present, standing in for the corrupted profile a real
+    # user would be trying to get away from by recalibrating.
+    templates = {t: make_template(t, np.full((64, 64, 3), (200 - t, 190, 180), dtype=np.uint8)) for t in range(1, 4)}
+    profile = GameProfile(
+        window_title=window_info.title,
+        roi=RoiOffset(0, 0, 320, 320),
+        window_size_at_calibration=(400, 400),
+        tile_templates=templates,
+        settle_frames=1,
+        settle_timeout_ms=300.0,
+        confidence_threshold=0.6,
+    )
+    store.save(profile)
+
+    window = MainWindow(profile_store=store, capture_backend=_FakeCaptureBackend())
+    try:
+        # Ordinary first selection: normal auto-resume behavior must still work.
+        window._on_window_selected(window_info)
+        assert window.wizard.step is WizardStep.READY_TO_PLAY
+        assert set(window.wizard.data.tile_learner.recognizer.templates) == {1, 2, 3}
+
+        # Recalibrate, then pick the *same* window again -- exactly what the user did.
+        window._recalibrate()
+        assert window.wizard.step is WizardStep.PICK_WINDOW
+        assert window._force_recalibration is True
+
+        window._on_window_selected(window_info)
+
+        assert window.wizard.step is WizardStep.CONFIRM_GRID, (
+            "must go through grid confirmation and tile learning again, not bounce back to "
+            "ready-to-play with the old profile"
+        )
+        assert window._force_recalibration is False, "the flag must not leak into later selections"
+        assert window.wizard.data.tile_learner.recognizer.templates == {}, (
+            "recalibrating must start tile learning from a clean slate, not carry over the "
+            "old (possibly corrupted) templates"
+        )
     finally:
         window.close()
