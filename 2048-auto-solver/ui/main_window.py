@@ -143,6 +143,10 @@ class MainWindow(QMainWindow):
     def _on_window_selected(self, window_info) -> None:
         scale_factor = self.capture_backend.get_scale_factor()
         bounds = (window_info.left, window_info.top, window_info.width, window_info.height)
+        logger.info(
+            "Selected window %r: logical bounds=%s, scale_factor=%s",
+            window_info.title, bounds, scale_factor,
+        )
 
         if self._force_recalibration:
             # The user explicitly asked to redo calibration for this window; matching the
@@ -200,7 +204,18 @@ class MainWindow(QMainWindow):
             self._enter_current_step()
             return
 
+        logger.info(
+            "Captured region for grid detection: window_bounds=%s scale=%s -> region=(%d,%d,%d,%d), "
+            "actual frame shape=%s",
+            self.wizard.data.window_bounds, scale, region.left, region.top, region.width, region.height,
+            frame.shape,
+        )
         detection = detect_grid(frame)
+        logger.info(
+            "Grid detection result: method=%s confidence=%.2f box=(%d,%d,%d,%d)",
+            detection.method, detection.confidence, detection.left, detection.top,
+            detection.width, detection.height,
+        )
         self.wizard.set_grid_detection(detection)
         page = GridConfirmPage(
             frame, detection.left, detection.top, detection.width, detection.height,
